@@ -151,7 +151,7 @@
 
   <div class="card">
     <h2><span class="step-num">2</span>Generate — vetted input &rarr; plan</h2>
-    <p class="desc">POST /api/v1/planner/plans. Edit the JSON below (this is the full PlannerInput shape — see src/types/ai-planner.types.ts) then generate.</p>
+    <p class="desc">POST /api/v1/planner/plans. Edit the JSON below (this is the full PlannerInput shape — see src/types/planner.types.ts) then generate.</p>
     <label for="generateInput">Input (PlannerInput JSON)</label>
     <textarea class="json" id="generateInput">{
   "brand": { "name": "Nyka", "category": "Beauty & Personal Care" },
@@ -164,12 +164,18 @@
   </div>
 
   <div class="card">
-    <h2><span class="step-num">3</span>Save — persist the generated plan</h2>
-    <p class="desc">PUT /api/v1/planner/plans/:planId. Saves the input + plan from step 2 above under the planId you choose (upsert).</p>
-    <label for="planId">Plan ID</label>
-    <input type="text" id="planId" placeholder="e.g. a uuid, or any stable string for this planning session">
-    <button id="saveBtn">Save plan<span id="saveStatus"></span></button>
-    <pre class="response" id="saveResponse" hidden></pre>
+    <h2><span class="step-num">3</span>Create — persist the generated plan</h2>
+    <p class="desc">POST /api/v1/planner/plan (singular). Saves the input + plan from step 2 above — the server generates a new id and returns it.</p>
+    <button id="createBtn">Create plan<span id="createStatus"></span></button>
+    <pre class="response" id="createResponse" hidden></pre>
+
+    <details>
+      <summary>Update an existing plan instead (PUT, known id)</summary>
+      <label for="planId">Plan ID</label>
+      <input type="text" id="planId" placeholder="paste an id from a previous Create, or the list below">
+      <button id="saveBtn" class="secondary">Update plan<span id="saveStatus"></span></button>
+      <pre class="response" id="saveResponse" hidden></pre>
+    </details>
   </div>
 
   <div class="card">

@@ -92,6 +92,29 @@ $('generateBtn').addEventListener('click', async () => {
   }
 });
 
+$('createBtn').addEventListener('click', async () => {
+  if (!lastGeneratedPlan) {
+    setStatus($('createStatus'), false, 'Run Generate first');
+    return;
+  }
+  let input;
+  try {
+    input = JSON.parse($('generateInput').value);
+  } catch (e) {
+    setStatus($('createStatus'), false, 'Generate input is invalid JSON');
+    return;
+  }
+  const result = await runStep('createBtn', 'createStatus', 'createResponse', () =>
+    callApi('/api/v1/planner/plan', {
+      method: 'POST',
+      body: JSON.stringify({ input, plan: lastGeneratedPlan }),
+    })
+  );
+  if (result && result.body && result.body.data && result.body.data.id) {
+    $('planId').value = result.body.data.id;
+  }
+});
+
 $('saveBtn').addEventListener('click', async () => {
   const planId = $('planId').value.trim();
   if (!planId) {
