@@ -27,6 +27,16 @@ export class PlannerController {
         }
     };
 
+    create = async (req: RequestWithId, res: Response, next: NextFunction) => {
+        try {
+            const { input, plan } = req.body as { input: PlannerInput; plan: GeneratedPlan };
+            const data = await this.plannerService.create(input, plan);
+            sendResponse(req, res, 201, 'Plan created', data);
+        } catch (error) {
+            next(error);
+        }
+    };
+
     save = async (req: RequestWithId, res: Response, next: NextFunction) => {
         try {
             const { planId } = req.params;

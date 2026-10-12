@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { generateCurveCommentary, generateNarration, generateSuggestions, mergePlan, SuggestResult } from '../config/planner.prompts';
 import { buildCandidateInventory } from './planner.candidates';
 import { buildPlanCore } from './allocation.service';
@@ -91,7 +92,12 @@ export class PlannerService {
         return mergePlan(input, core, narration, budgetCurve, cpmCurve, curveCommentary);
     }
 
-    /** Persists an already-generated plan under a stable planId (upsert). Reuses PlanService's existing storage machinery rather than duplicating it — toPlanSaveRequest above only adapts a GeneratedPlan into the save envelope it already accepts. */
+    /** Creates a new saved plan with a server-generated id — the actual "create" in this API, since the id is never trusted from the caller here (unlike save(), which updates a specific, already-known id). A random UUID rather than a client-supplied one is also the safer default: nothing in this storage layer checks who owns a planId, so a guessable or caller-chosen id would be an easy way to collide with (or overwrite) someone else's plan. */
+    async create(input: PlannerInput, plan: GeneratedPlan): Promise<{ id: string; savedAt: string }> {
+        return this.save(randomUUID(), input, plan);
+    }
+
+    /** Persists an already-generated plan under a known planId (upsert) — for a caller re-saving a plan it already has the id for. Reuses PlanService's existing storage machinery rather than duplicating it — toPlanSaveRequest above only adapts a GeneratedPlan into the save envelope it already accepts. */
     async save(planId: string, input: PlannerInput, plan: GeneratedPlan): Promise<{ id: string; savedAt: string }> {
         const request = toPlanSaveRequest(planId, input, plan);
         return this.planService.save(request);
