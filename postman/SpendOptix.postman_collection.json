@@ -1,0 +1,114 @@
+{
+    "info": {
+        "name": "SpendOptix Backend",
+        "description": "Brief analysis (Bedrock Claude) and media plan persistence. Set {{baseUrl}} and {{authToken}} in the collection/environment variables — every route except health checks requires a valid Firebase ID token (project: justbaat-apps) as a Bearer token.",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "variable": [
+        { "key": "baseUrl", "value": "https://onespend.worldnewscorp.com" },
+        { "key": "authToken", "value": "" },
+        { "key": "planId", "value": "8f3c1d2e-demo-plan-0001" }
+    ],
+    "auth": {
+        "type": "bearer",
+        "bearer": [{ "key": "token", "value": "{{authToken}}", "type": "string" }]
+    },
+    "item": [
+        {
+            "name": "Health",
+            "item": [
+                {
+                    "name": "Root health check",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/",
+                        "auth": { "type": "noauth" }
+                    }
+                },
+                {
+                    "name": "Health",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/health",
+                        "auth": { "type": "noauth" }
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Plan",
+            "item": [
+                {
+                    "name": "Analyse brief — campaign-brief",
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/plan/analyse",
+                        "header": [{ "key": "Content-Type", "value": "application/json" }],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"brief\": \"Spotify India — audio campaign, Tier 1 metros (Delhi, Mumbai, Bangalore, Hyderabad, Chennai, Kolkata, Ahmedabad).\\nBudget: 50 Lakh. Flight: Oct 1 to Oct 30, 2026.\\nTargeting: Male skew, 25-54. Placements: Spotify & JioSaavn.\\nObjective is reach maximization. Frequency cap 3x per week.\",\n  \"type\": \"campaign-brief\",\n  \"context\": {\n    \"country\": \"IN\",\n    \"channels\": [\"ctv\", \"mobile-ott\", \"web-display\", \"audio\", \"dooh\"],\n    \"objectives\": [\"awareness\", \"conversions\", \"reach-maximization\"],\n    \"kpis\": [\"CPM\", \"CTR\", \"VTR\", \"reach\"]\n  }\n}",
+                            "options": { "raw": { "language": "json" } }
+                        }
+                    }
+                },
+                {
+                    "name": "Analyse brief — inventory-rfp",
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/plan/analyse",
+                        "header": [{ "key": "Content-Type", "value": "application/json" }],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"brief\": \"Could you please check the inventory availability for SunNXT, specifically for the Tamil Nadu region (automotive category). We plan to target audiences internally via DSP - could you please check if we can still hit the 4M impression goal with the targeting. Additionally, please let us know the CPM for Mobile and CTV separately and the expected VTRs for 30 secs creative.\",\n  \"type\": \"inventory-rfp\",\n  \"context\": {\n    \"country\": \"IN\",\n    \"channels\": [\"ctv\", \"mobile-ott\", \"web-display\", \"audio\", \"dooh\"],\n    \"objectives\": [],\n    \"kpis\": []\n  }\n}",
+                            "options": { "raw": { "language": "json" } }
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Media Plans",
+            "item": [
+                {
+                    "name": "List media plans",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{baseUrl}}/media-plans?limit=20",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["media-plans"],
+                            "query": [{ "key": "limit", "value": "20" }]
+                        }
+                    }
+                },
+                {
+                    "name": "Save (upsert) a media plan",
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/media-plans",
+                        "header": [{ "key": "Content-Type", "value": "application/json" }],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"schemaVersion\": 1,\n  \"planId\": \"{{planId}}\",\n  \"source\": { \"app\": \"spendoptix-console\", \"trigger\": \"summary-step\" },\n  \"brief\": {\n    \"text\": \"Spotify India — audio campaign, Tier 1 metros. Budget 50 Lakh, Oct 1-30 2026, male 25-54.\",\n    \"parsed\": {},\n    \"answers\": { \"kpi\": \"A\", \"product\": \"D\" }\n  },\n  \"campaign\": {\n    \"name\": \"Spotify India — Audio, Tier 1 Metros\",\n    \"advertiser\": \"Spotify\",\n    \"product\": null,\n    \"objective\": \"reach-maximization\",\n    \"kpi\": \"CPM\",\n    \"budget\": 5000000,\n    \"currency\": \"INR\",\n    \"flight\": { \"start\": \"2026-10-01\", \"end\": \"2026-10-30\", \"durationDays\": 30 }\n  },\n  \"market\": {\n    \"country\": \"IN\",\n    \"geos\": [\"Delhi\", \"Mumbai\", \"Bangalore\", \"Hyderabad\", \"Chennai\", \"Kolkata\", \"Ahmedabad\"]\n  },\n  \"audience\": {\n    \"basis\": \"modelled\",\n    \"gender\": [{ \"label\": \"Male\", \"percent\": 68 }, { \"label\": \"Female\", \"percent\": 32 }],\n    \"age\": [{ \"label\": \"25-34\", \"percent\": 42 }, { \"label\": \"35-44\", \"percent\": 35 }, { \"label\": \"45-54\", \"percent\": 23 }],\n    \"geo\": [{ \"label\": \"Delhi\", \"percent\": 28 }, { \"label\": \"Mumbai\", \"percent\": 26 }]\n  },\n  \"inventory\": {\n    \"source\": \"brief\",\n    \"rows\": 3,\n    \"available\": { \"impressions\": 8500000, \"uniques\": 2100000 },\n    \"channels\": [\n      { \"id\": \"audio\", \"name\": \"Digital Audio\", \"allocation\": 100, \"amount\": 5000000, \"rows\": 3, \"impressions\": 8500000, \"uniques\": 2100000 }\n    ],\n    \"publishers\": [\n      { \"name\": \"Spotify\", \"rows\": 2, \"impressions\": 6000000 },\n      { \"name\": \"JioSaavn\", \"rows\": 1, \"impressions\": 2500000 }\n    ],\n    \"topSites\": [],\n    \"unmatchedTerms\": []\n  },\n  \"forecast\": {\n    \"basis\": \"allocation-share-of-available\",\n    \"impressions\": 8500000,\n    \"reach\": 2100000,\n    \"availableImpressions\": 8500000,\n    \"availableUniques\": 2100000,\n    \"goal\": null\n  }\n}",
+                            "options": { "raw": { "language": "json" } }
+                        }
+                    }
+                },
+                {
+                    "name": "Get media plan by id",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/media-plans/{{planId}}"
+                    }
+                },
+                {
+                    "name": "Approve media plan",
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/media-plans/{{planId}}/approve"
+                    }
+                }
+            ]
+        }
+    ]
+}

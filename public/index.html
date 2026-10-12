@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpendOptix API Tester</title>
+<style>
+  :root {
+    --bg: #FAFAF6;
+    --surface: #FFFFFF;
+    --surface-2: #F2F0E9;
+    --ink: #221F1A;
+    --muted: #6B6558;
+    --border: #E4E0D6;
+    --accent: #2B5D8C;
+    --accent-ink: #FFFFFF;
+    --ok-bg: #E7F5F0;
+    --ok-ink: #14543F;
+    --err-bg: #FBEAEA;
+    --err-ink: #8A2323;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17140F;
+      --surface: #201C15;
+      --surface-2: #2A251C;
+      --ink: #F1ECE1;
+      --muted: #B0A794;
+      --border: #3A342A;
+      --accent: #7FB3E0;
+      --accent-ink: #12202C;
+      --ok-bg: #163D30;
+      --ok-ink: #B9EBD9;
+      --err-bg: #4A1F1F;
+      --err-ink: #F6C3C3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px 16px 64px;
+    max-width: 760px;
+    margin-inline: auto;
+    line-height: 1.5;
+  }
+  code, textarea, input, pre { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 0 0 20px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .card h2 { font-size: 0.95rem; margin: 0 0 10px; }
+  label { display: block; font-size: 0.82rem; color: var(--muted); margin: 10px 0 4px; }
+  label:first-child { margin-top: 0; }
+  input[type="text"], input[type="password"], textarea, select {
+    width: 100%;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--ink);
+    padding: 8px 10px;
+    font-size: 0.85rem;
+  }
+  textarea { resize: vertical; min-height: 110px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > div { flex: 1 1 160px; }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; font-size: 0.82rem; color: var(--muted); }
+  button {
+    background: var(--accent);
+    color: var(--accent-ink);
+    border: none;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 12px;
+  }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--ink);
+    font-weight: 500;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    border-radius: 999px;
+    padding: 3px 10px;
+    margin-left: 10px;
+  }
+  .status.ok { background: var(--ok-bg); color: var(--ok-ink); }
+  .status.err { background: var(--err-bg); color: var(--err-ink); }
+  pre.response {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 0.78rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 60vh;
+  }
+  .hint { font-size: 0.76rem; color: var(--muted); margin-top: 4px; }
+  .plans-list { display: flex; flex-direction: column; gap: 6px; font-size: 0.82rem; }
+  .plans-list .plan-row {
+    display: flex; justify-content: space-between; gap: 8px;
+    border-top: 1px solid var(--border); padding-top: 6px;
+  }
+  .plans-list .plan-row:first-child { border-top: none; padding-top: 0; }
+</style>
+</head>
+<body>
+  <h1>SpendOptix API Tester</h1>
+  <p class="subtitle">Talks directly to this same server — no separate setup needed. Requests use whatever bearer token you paste below.</p>
+
+  <div class="card">
+    <h2>Auth</h2>
+    <label for="token">Bearer token</label>
+    <input type="password" id="token" placeholder="paste the test token you were given, or a real ID token" autocomplete="off">
+    <p class="hint">Paste the static test token you were given (doesn't expire) — or sign into the console with your justbaat.com Google account and copy a real ID token from your browser's Network tab instead (expires in ~1hr). Either works. Saved locally in this browser only.</p>
+  </div>
+
+  <div class="card">
+    <h2>Analyse a brief</h2>
+    <label for="brief">Brief text</label>
+    <textarea id="brief" placeholder="Paste a campaign brief or an RFP-style ask here...">Spotify India — audio campaign, Tier 1 metros (Delhi, Mumbai, Bangalore, Hyderabad, Chennai, Kolkata, Ahmedabad).
+Budget: 50 Lakh. Flight: Oct 1 to Oct 30, 2026.
+Targeting: Male skew, 25-54. Placements: Spotify &amp; JioSaavn.
+Objective is reach maximization. Frequency cap 3x per week.</textarea>
+
+    <div class="row">
+      <div>
+        <label for="type">Type</label>
+        <select id="type">
+          <option value="" selected>Auto-detect (recommended)</option>
+          <option value="campaign-brief">Force: campaign-brief</option>
+          <option value="inventory-rfp">Force: inventory-rfp</option>
+        </select>
+      </div>
+    </div>
+
+    <details>
+      <summary>Advanced — context (channels / objectives / kpis)</summary>
+      <label for="channels">Channels (comma-separated)</label>
+      <input type="text" id="channels" value="ctv, mobile-ott, web-display, audio, dooh">
+      <label for="objectives">Objectives (comma-separated)</label>
+      <input type="text" id="objectives" value="awareness, conversions, reach-maximization">
+      <label for="kpis">KPIs (comma-separated)</label>
+      <input type="text" id="kpis" value="CPM, CTR, VTR, reach">
+    </details>
+
+    <button id="analyseBtn">Analyse<span id="analyseStatus"></span></button>
+    <pre class="response" id="analyseResponse" hidden></pre>
+  </div>
+
+  <div class="card">
+    <h2>Saved media plans <button class="secondary" id="refreshPlans" style="margin: 0 0 0 8px; padding: 3px 10px; font-size: 0.75rem;">Refresh</button></h2>
+    <div class="plans-list" id="plansList"><span class="hint">Not loaded yet.</span></div>
+  </div>
+
+<script src="tester.js"></script>
+</body>
+</html>

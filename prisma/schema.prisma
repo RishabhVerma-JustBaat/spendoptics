@@ -1,0 +1,166 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Same Postgres instance/URL as VisionPlayBackend (env DATABASE_URL) — this is
+// its own table, `media_plans`, so it doesn't touch any of that app's tables.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Blocks are stored as JSON: "fields inside a block may be added at any time;
+// consumers ignore keys they do not know" (per the save payload contract), so a
+// rigid relational shape would fight every future field addition.
+model MediaPlan {
+  planId        String   @id @map("plan_id")
+  schemaVersion Int      @map("schema_version")
+  source        Json
+  brief         Json
+  campaign      Json
+  market        Json
+  audience      Json
+  inventory     Json
+  forecast      Json
+  approved      Boolean   @default(false)
+  approvedBy    String?   @map("approved_by")
+  approvedAt    DateTime? @map("approved_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  savedAt       DateTime  @updatedAt @map("saved_at")
+
+  @@map("media_plans")
+}
+
+// Everything below is read-only reference data, re-ingested wholesale from rate-card
+// spreadsheets via scripts/ingest-inventory.ts whenever a fresher sheet arrives (truncate +
+// reinsert, not upserted row by row — there's no stable natural key across sheet versions
+// worth tracking). plan-prompts.ts queries these instead of asking Bedrock to invent a CPM,
+// impression count, or publisher name wherever a real match exists.
+
+model InventoryPackage {
+  id            Int     @id @default(autoincrement())
+  packageName   String  @map("package_name")
+  details       String?
+  floorCpm      Int     @map("floor_cpm")
+  geo           String
+  environment   String
+  device        String
+  inventoryType String  @map("inventory_type")
+  // Raw "/"-separated publisher list from the sheet, split at query time — not worth a join
+  // table for 6 rows of reference data.
+  publishers    String
+  dealType      String  @map("deal_type")
+  remarks       String?
+
+  @@map("inventory_packages")
+}
+
+model InventoryCtvInventory {
+  id                 Int     @id @default(autoincrement())
+  appUrl             String  @map("app_url")
+  applicationName    String  @map("application_name")
+  platform           String
+  type               String
+  totalImpressions   BigInt  @map("total_impressions")
+  totalUniques       BigInt  @map("total_uniques")
+  creativeDuration   String  @map("creative_duration")
+  cpmOpen            Int     @map("cpm_open")
+  cpmPremiumAudience Int     @map("cpm_premium_audience")
+  cpmAdvanced        Int     @map("cpm_advanced")
+  vcr                Float
+  avgMarketCpm       Int     @map("avg_market_cpm")
+  audienceCohorts    String? @map("audience_cohorts")
+  audienceCohortDetail String? @map("audience_cohort_detail")
+
+  @@map("inventory_ctv")
+}
+
+model InventoryMobileOttInventory {
+  id                 Int     @id @default(autoincrement())
+  packageId          String  @map("package_id")
+  appName            String  @map("app_name")
+  country            String
+  totalAvails        BigInt  @map("total_avails")
+  creativeDuration   String  @map("creative_duration")
+  cpmOpen            Int     @map("cpm_open")
+  cpmPremiumAudience Int     @map("cpm_premium_audience")
+  cpmAdvanced        Int     @map("cpm_advanced")
+  vcr                Float
+  avgMarketCpm       Int     @map("avg_market_cpm")
+  audienceCohorts    String? @map("audience_cohorts")
+  audienceCohortDetail String? @map("audience_cohort_detail")
+
+  @@map("inventory_mobile_ott")
+}
+
+// Superseded by InventoryWebsite / InventoryMobileInApp below (the "Spendoptix_IAB_Categorized
+// Master Sheet" split website vs. in-app inventory into separate tabs with a richer, 26-category
+// taxonomy — something the old single Web Display/Web Video sheets never distinguished). Kept
+// in place rather than dropped for now — nothing queries these anymore, but the tables and
+// their ~45k rows stay until there's a reason to actually remove them.
+
+model InventoryWebDisplayInventory {
+  id            Int    @id @default(autoincrement())
+  pageUrl       String @map("page_url")
+  adFormat      String @map("ad_format")
+  iabCategory   String @map("iab_category")
+  totalRequests BigInt @map("total_requests")
+  cpm           Int
+  avgMarketCpm  Int    @map("avg_market_cpm")
+
+  @@index([iabCategory])
+  @@map("inventory_web_display")
+}
+
+model InventoryWebVideoInventory {
+  id            Int    @id @default(autoincrement())
+  pageUrl       String @map("page_url")
+  adFormat      String @map("ad_format")
+  iabCategory   String @map("iab_category")
+  totalRequests BigInt @map("total_requests")
+  vcr           Float
+  adDuration    String @map("ad_duration")
+  cpm           Int
+  avgMarketCpm  Int    @map("avg_market_cpm")
+
+  @@index([iabCategory])
+  @@map("inventory_web_video")
+}
+
+// "PAN IN-Websites" tab of the master sheet — PAN-India only, no state/city breakdown yet.
+model InventoryWebsite {
+  id                Int      @id @default(autoincrement())
+  inventoryName     String   @map("inventory_name")
+  adFormat          String   @map("ad_format")
+  environment       String
+  // Raw comma-separated values from the sheet (e.g. "Banner(IAB Standard Sizes), Native").
+  supportedAdType   String   @map("supported_ad_type")
+  // Postgres native array, not a comma string — a row often carries several categories
+  // ("News, Internet & Telecom"), and this needs real set-membership filtering per category.
+  iabCategories     String[] @map("iab_categories")
+  geography         String
+  totalImpressions  BigInt   @map("total_impressions")
+  // Empty on every row as of this ingestion — the column exists in the sheet but isn't
+  // populated. Kept nullable rather than dropped since it may start arriving later.
+  totalUniqueAudience BigInt? @map("total_unique_audience")
+  eCpm              Float    @map("e_cpm")
+  buyingCpm         Float    @map("buying_cpm")
+  floorCpm          Float    @map("floor_cpm")
+
+  @@index([iabCategories], type: Gin)
+  @@map("inventory_websites")
+}
+
+// "PAN IN- Mobile In App" tab — no IAB category or geography column at all in this sheet, and
+// eCPM is populated on only a minority of rows (the rest are 0, not a real price).
+model InventoryMobileInApp {
+  id            Int    @id @default(autoincrement())
+  inventoryUrl  String @map("inventory_url")
+  appName       String @map("app_name")
+  adFormat      String @map("ad_format")
+  platform      String
+  totalRequests BigInt @map("total_requests")
+  eCpm          Float  @map("e_cpm")
+
+  @@map("inventory_mobile_inapp")
+}

@@ -1,0 +1,61 @@
+{
+  "name": "spendoptix-backend",
+  "version": "1.0.0",
+  "description": "Backend for the SpendOptix Console media-planning app — brief analysis (Bedrock Claude) and media plan persistence",
+  "main": "lib/index.js",
+  "predeploy": [
+    "npm run build"
+  ],
+  "scripts": {
+    "build": "prisma generate && tsc",
+    "postinstall": "prisma generate",
+    "start:server": "node lib/server.js",
+    "pm2:start": "pm2 start lib/server.js --name spendoptix-api",
+    "serve": "npm run build && firebase emulators:start --only functions",
+    "shell": "npm run build && firebase functions:shell",
+    "start": "npm run shell",
+    "dev": "tsc --watch & firebase emulators:start --only functions:spendoptix_api",
+    "deploy": "npm run build && firebase deploy --only functions:spendoptix_api",
+    "logs": "firebase functions:log",
+    "format": "prettier --write ./src",
+    "format:check": "prettier --check ./src",
+    "lint": "tsc --noEmit",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "ingest:inventory": "node scripts/ingest-inventory.js"
+  },
+  "engines": {
+    "node": "22"
+  },
+  "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "^0.33.0",
+    "@prisma/client": "^5.22.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^4.18.2",
+    "firebase-admin": "^11.11.1",
+    "firebase-functions": "^4.8.1",
+    "helmet": "^7.0.0",
+    "joi": "^17.9.2",
+    "morgan": "^1.10.0",
+    "uuid": "^11.1.0",
+    "xlsx": "^0.18.5",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
+    "@types/cors": "^2.8.13",
+    "@types/express": "^4.17.17",
+    "@types/morgan": "^1.9.4",
+    "@types/node": "^20.4.2",
+    "@types/uuid": "^9.0.2",
+    "cross-env": "^7.0.3",
+    "prettier": "^3.5.3",
+    "prisma": "^5.22.0",
+    "typescript": "^5.1.6"
+  }
+}
