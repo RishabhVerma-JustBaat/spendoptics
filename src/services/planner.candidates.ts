@@ -9,16 +9,22 @@ import {
 
 const prisma = new PrismaClient();
 
-/** Many-to-one — several input platform values collapse onto the same real output line. "Can keep changing" per product direction, so this is a lookup table, not inlined branching. */
-const PLATFORM_LINE_MAP: Record<Platform, InventoryLine | null> = {
-    ctv: 'ctv-oem-fast',
-    'ctv-oem': 'ctv-oem-fast',
-    'ctv-fast': 'ctv-oem-fast', // no data distinguishes FAST from regular CTV/OEM yet — same pool
-    'mobile-ott': 'mobile-ott',
-    web: 'websites',
-    mweb: 'websites',
-    'in-app': 'in-app',
-    youtube: null, // no real data — always routed to plannedByTeam, never a candidate
+/**
+ * One platform can draw from more than one line (a bare "ctv" request wants both FAST and OTT
+ * CTV inventory), so this maps to an array, not a single line. "Can keep changing" per product
+ * direction, so this is a lookup table, not inlined branching.
+ */
+const PLATFORM_LINE_MAP: Record<Platform, InventoryLine[]> = {
+    ctv: ['ctv-fast', 'ctv-ott'],
+    // The ingested data's "OEM" type is the closest real proxy to "FAST channel" — see
+    // planner.types.ts's INVENTORY_LINES comment for why.
+    'ctv-oem': ['ctv-fast'],
+    'ctv-fast': ['ctv-fast'],
+    'mobile-ott': ['mobile-ott'],
+    web: ['websites'],
+    mweb: ['websites'],
+    'in-app': ['in-app'],
+    youtube: [], // no real data — always routed to plannedByTeam, never a candidate
 };
 
 const caseInsensitiveMatch = (value: string, list: string[]): boolean => {
@@ -106,6 +112,7 @@ const passesVolumeFilters = (
     return true;
 };
 
+/** Returns both ctv-fast and ctv-ott items in one query — buildCandidateInventory below splits them by their own .line, since whether a given platform request needs one, the other, or both is a many-to-one relationship already resolved by PLATFORM_LINE_MAP. */
 const fetchCtvCandidates = async (input: PlannerInput, tier: RateTier): Promise<CandidateInventoryItem[]> => {
     const rows = await prisma.inventoryCtvInventory.findMany();
     const cpmColumn = tier === 'open' ? 'cpmOpen' : tier === 'premium' ? 'cpmPremiumAudience' : 'cpmAdvanced';
@@ -115,8 +122,11 @@ const fetchCtvCandidates = async (input: PlannerInput, tier: RateTier): Promise<
         .map(r => ({
             id: r.appUrl,
             name: r.applicationName,
-            line: 'ctv-oem-fast' as InventoryLine,
-            platform: 'ctv' as Platform,
+            // OEM = manufacturer-preloaded, ad-supported, channel-style apps (Samsung TV Plus,
+            // TCL Channel) — a real proxy for "FAST channel", not an invented split. See
+            // planner.types.ts's INVENTORY_LINES comment.
+            line: (r.type === 'OEM' ? 'ctv-fast' : 'ctv-ott') as InventoryLine,
+            platform: (r.type === 'OEM' ? 'ctv-fast' : 'ctv') as Platform,
             avails: Number(r.totalImpressions),
             uniqueAudience: Number(r.totalUniques),
             cpm: r[cpmColumn],
@@ -235,20 +245,24 @@ export const buildCandidateInventory = async (input: PlannerInput): Promise<Cand
     const requestedPlatforms = input.inventory.platforms.length > 0 ? input.inventory.platforms : PLATFORMS_ALL;
     const tier = computeRateTier(input);
 
-    const linesNeeded = new Set(
-        requestedPlatforms.map(p => PLATFORM_LINE_MAP[p]).filter((l): l is InventoryLine => l !== null)
-    );
+    const linesNeeded = new Set(requestedPlatforms.flatMap(p => PLATFORM_LINE_MAP[p]));
+
+    const ctvNeeded = linesNeeded.has('ctv-fast') || linesNeeded.has('ctv-ott');
+    const allCtv = ctvNeeded ? await fetchCtvCandidates(input, tier) : [];
 
     const byLine: Record<InventoryLine, CandidateInventoryItem[]> = {
-        'ctv-oem-fast': linesNeeded.has('ctv-oem-fast') ? await fetchCtvCandidates(input, tier) : [],
+        'ctv-fast': linesNeeded.has('ctv-fast') ? allCtv.filter(c => c.line === 'ctv-fast') : [],
+        'ctv-ott': linesNeeded.has('ctv-ott') ? allCtv.filter(c => c.line === 'ctv-ott') : [],
         'mobile-ott': linesNeeded.has('mobile-ott') ? await fetchMobileOttCandidates(input, tier) : [],
         websites: linesNeeded.has('websites') ? await fetchWebsiteCandidates(input) : [],
         'in-app': linesNeeded.has('in-app') ? await fetchInAppCandidates(input) : [],
     };
 
+    // A platform maps to one or more lines (see PLATFORM_LINE_MAP) — it's only truly
+    // unplannable if every line it could mean came back with nothing at all.
     const unplannablePlatforms = requestedPlatforms.filter(p => {
-        const line = PLATFORM_LINE_MAP[p];
-        return line === null || byLine[line].length === 0;
+        const lines = PLATFORM_LINE_MAP[p];
+        return lines.length === 0 || lines.every(line => byLine[line].length === 0);
     });
 
     return { byLine, unplannablePlatforms };

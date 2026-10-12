@@ -215,6 +215,8 @@ For EVERY field, decide one of three provenance tags:
 
 Never skip a field because nothing was said — tag it "assumed" and give your best reasonable default instead. The one exception is "inventory.iabCategories" — only suggest one of these real categories: ${iabCategories.join(', ')} — or leave it unsuggested if genuinely nothing fits, since inventing one that doesn't exist in the real data defeats its purpose.
 
+Today's date is ${new Date().toISOString().slice(0, 10)}. The brief may give a date or date range with no year (e.g. "Oct 10 to Nov 5") — resolve it to this year if that date hasn't passed yet, or next year if it has; never resolve a bare date to a year that's already in the past relative to today.
+
 Fields and their types/allowed values:
 ${FIELD_REFERENCE}
 
@@ -341,7 +343,7 @@ const buildNarrationSystemPrompt = (): string =>
 Hard rules:
 1. "title" is a short campaign-plan name (brand + objective + flight, e.g. "Nyka Reach Campaign — Nov 2026"). "summary" is one sentence covering what this plan does and why.
 2. "targetGroup" describes the audience actually targeted, as "type::value" strings — type is exactly one of ${TARGET_GROUP_TYPES.join(', ')}, value is the plain-text detail (e.g. "gender::Female", "age::25-34", "interest::Beauty & Fashion"). Only include what the brief/inputs actually specified — don't invent a target you weren't given.
-3. "lineReasons" is one "line::reason" string per budget line you're given, each reason a short sentence on why that line earned its share (e.g. "ctv-oem-fast::Premium video inventory with the strongest VCR for an awareness objective.").
+3. "lineReasons" is one "line::reason" string per budget line you're given, each reason a short sentence on why that line earned its share (e.g. "ctv-fast::Premium ad-supported channel inventory with the strongest VCR for an awareness objective.").
 4. "itemReasons" is one "line|inventoryId::reason" string per recommended item you're given, each reason specific to that item's role and numbers WITHIN that line only (e.g. a reach-driver's reason cites its avails, a cost-efficient item's reason cites its CPM) — never a reason blending two different lines together. The same inventoryId can appear under more than one line (the same real property can be both a CTV row and a Mobile OTT row) — treat each line|inventoryId pair as its own separate item needing its own separate reason, even when the id repeats. Use the exact line and inventoryId you were given, unchanged — never invent either.
 5. "assumptions" lists anything the deterministic engine had to default because the input didn't specify it (you're told what was left unset) — plain language, one per line.
 6. "recommendedWindows" is up to 3 flight-date windows as "startDate::endDate::score::reason" strings (dates as YYYY-MM-DD, every date must be on or after ${new Date().toISOString().slice(0, 10)} — never recommend a window that's already in the past) — your own judgment on good timing for this brand/category/objective (seasonality, festivals, typical category patterns), since there's no real historical booking data behind this yet. "score" is a 0-100 confidence number you assign, not a measured figure — be honest that it's a judgment call, not a guarantee. "datesToAvoid" is "startDate::endDate::reason" strings (same date rule) for windows to avoid (e.g. clashing with a major unrelated event). "givenVsBest" compares the input's own dates (if given) to your top recommended window in one sentence, or null if no dates were given to compare.

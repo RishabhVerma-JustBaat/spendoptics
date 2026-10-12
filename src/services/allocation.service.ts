@@ -166,7 +166,8 @@ const projectKpiFit = (
 };
 
 const PLATFORM_FOR_LINE: Record<InventoryLine, Platform> = {
-    'ctv-oem-fast': 'ctv',
+    'ctv-fast': 'ctv-fast',
+    'ctv-ott': 'ctv',
     'mobile-ott': 'mobile-ott',
     websites: 'web',
     'in-app': 'in-app',

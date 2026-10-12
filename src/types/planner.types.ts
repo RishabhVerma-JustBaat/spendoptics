@@ -85,8 +85,18 @@ export type OptimiseFor = (typeof OPTIMISE_FOR)[number];
 export const DIVERSIFICATIONS = ['concentrated', 'balanced', 'broad'] as const;
 export type Diversification = (typeof DIVERSIFICATIONS)[number];
 
-/** The 4 real output lines — see PLATFORM_LINE_MAP for how the 8 input platforms collapse onto these. */
-export const INVENTORY_LINES = ['ctv-oem-fast', 'mobile-ott', 'in-app', 'websites'] as const;
+/**
+ * The 5 real output lines — see PLATFORM_LINE_MAP in planner.candidates.ts for how the 8 input
+ * platforms map onto these. "ctv-fast" vs "ctv-ott" is a real split backed by the ingested
+ * data's own "type" column (OEM vs Non-OEM) — OEM rows are manufacturer-preloaded,
+ * ad-supported, channel-style apps (Samsung TV Plus, TCL Channel), which is the closest real
+ * distinction this data has to "FAST channel" vs a regular on-demand CTV app. It's a proxy, not
+ * an exact match (a few Non-OEM entries are live-TV/news apps that aren't really "OTT" either),
+ * but it's a real, data-backed split — these used to be merged into one "ctv-oem-fast" line
+ * with no way to treat them differently, which broke on a real brief asking for separate CPMs
+ * per sub-type.
+ */
+export const INVENTORY_LINES = ['ctv-fast', 'ctv-ott', 'mobile-ott', 'in-app', 'websites'] as const;
 export type InventoryLine = (typeof INVENTORY_LINES)[number];
 
 export const RATE_TIERS = ['open', 'premium', 'advance'] as const;
