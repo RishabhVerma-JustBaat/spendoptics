@@ -44,11 +44,20 @@ export type AffluenceSec = (typeof AFFLUENCE_SECS)[number];
 export const INCOME_BANDS = ['premium', 'upper-mid', 'mid', 'mass'] as const;
 export type IncomeBand = (typeof INCOME_BANDS)[number];
 
-/** The 8 platform values the form accepts — PLATFORM_LINE_MAP below maps these onto the 4 real output lines (a many-to-one map, and "can keep changing" per product direction, so kept as a lookup table rather than inlined logic). */
+/**
+ * The 9 platform values the form accepts — PLATFORM_LINE_MAP in planner.candidates.ts maps
+ * these onto the 5 real output lines (a many-to-one map, and "can keep changing" per product
+ * direction, so kept as a lookup table rather than inlined logic). "ctv-oem" and "ctv-fast" are
+ * synonyms (both mean the FAST/ad-supported pool — "ctv-oem" is kept only because the original
+ * product spec named it that) — "ctv-ott" is the on-demand pool's own distinct value, added
+ * after a live test picked "ctv-oem" for an on-demand ask (JioHotstar/ZEE5/MX Player) because
+ * nothing else unambiguously meant "the non-FAST pool."
+ */
 export const PLATFORMS = [
     'ctv',
     'ctv-oem',
     'ctv-fast',
+    'ctv-ott',
     'mobile-ott',
     'web',
     'mweb',
@@ -128,6 +137,8 @@ export interface PlannerInput {
         campaignMonth: string | null;
         seasonality: string | null;
         pacing: Pacing | null;
+        /** Stated per-region delivery targets (e.g. a brief giving an impressions table by city/state) — captured faithfully even though nothing in the ingested inventory has city-level granularity to allocate against. Summed into a single national goal for allocation.service.ts's deliveryFit check; see that field's comment for why it can't be checked region-by-region. */
+        regionalTargets: { region: string; impressions: number }[];
     };
     audience: {
         geoScope: GeoScope | null;
@@ -160,6 +171,8 @@ export interface PlannerInput {
         maxCpm: number | null;
         minAvails: number | null;
         minUniqueAudience: number | null;
+        /** Stated per-channel rate asks (e.g. "₹130 for OTT-CTV, ₹100 for FAST") — unlike maxCpm above, this never filters candidate selection; it's purely what allocation.service.ts's cpmFit checks the actually-achieved line CPM against. Filtering by it could silently return nothing (or an unrealistically thin pool) instead of answering "is this rate realistic" with a real number. */
+        channelCpmTargets: { platform: Platform; maxCpm: number }[];
     };
     creative: {
         displayFormats: string[];
@@ -228,6 +241,21 @@ export interface KpiFitResult {
     comment: string | null;
 }
 
+/** Checks the sum of campaign.regionalTargets against the plan's actual estimatedImpressions — the only feasibility check possible for region-level asks, since no ingested inventory has city-level granularity to allocate against region by region. Null when no regional targets were given. */
+export interface DeliveryFitResult {
+    statedGoal: number;
+    projected: number;
+    verdict: 'meets' | 'close' | 'misses';
+}
+
+/** Checks a stated per-channel rate ask (inventory.channelCpmTargets) against the real blended CPM actually achieved for that line's selected inventory — "meets" means the real market rate is at or below what was asked for (cheaper is better for a buyer), not an exact match. One entry per channelCpmTargets entry that matched a line with any candidates at all. */
+export interface CpmFitResult {
+    platform: Platform;
+    target: number;
+    actual: number;
+    verdict: 'meets' | 'close' | 'misses';
+}
+
 /** The deterministic core of the plan — everything here is computed by allocation.service.ts, zero LLM involvement. Narration (title/summary/reason/assumptions/confidence text) gets merged in afterward by planner.prompts.ts's narration call. */
 export interface GeneratedPlanCore {
     keyFigures: {
@@ -247,6 +275,8 @@ export interface GeneratedPlanCore {
     budgetAllocation: BudgetAllocationLine[];
     plannedByTeam: { platform: Platform; reason: string }[];
     kpiFit: KpiFitResult[];
+    deliveryFit: DeliveryFitResult | null;
+    cpmFit: CpmFitResult[];
     buying: {
         dealType: (typeof DEAL_TYPES)[number] | null;
         dspCompatible: boolean;
@@ -336,6 +366,8 @@ export interface GeneratedPlan {
     brandSafety: GeneratedPlanCore['brandSafety'];
     checks: {
         kpiFit: KpiFitResult[];
+        deliveryFit: DeliveryFitResult | null;
+        cpmFit: CpmFitResult[];
         assumptions: string[];
     };
 }

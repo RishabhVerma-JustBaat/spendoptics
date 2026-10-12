@@ -81,6 +81,14 @@ export const generatePlanSchema = Joi.object({
             .valid(...PACINGS)
             .allow(null).empty('')
             .default(null),
+        regionalTargets: Joi.array()
+            .items(
+                Joi.object({
+                    region: Joi.string().required(),
+                    impressions: Joi.number().min(0).required(),
+                })
+            )
+            .default([]),
     }).default(),
 
     audience: Joi.object({
@@ -135,6 +143,16 @@ export const generatePlanSchema = Joi.object({
         maxCpm: Joi.number().min(0).allow(null).empty('').default(null),
         minAvails: Joi.number().integer().min(0).allow(null).empty('').default(null),
         minUniqueAudience: Joi.number().integer().min(0).allow(null).empty('').default(null),
+        channelCpmTargets: Joi.array()
+            .items(
+                Joi.object({
+                    platform: Joi.string()
+                        .valid(...PLATFORMS)
+                        .required(),
+                    maxCpm: Joi.number().min(0).required(),
+                })
+            )
+            .default([]),
     }).default(),
 
     creative: Joi.object({

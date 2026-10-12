@@ -13,6 +13,8 @@
 import {
     BudgetAllocationLine,
     CandidateInventoryItem,
+    CpmFitResult,
+    DeliveryFitResult,
     GeneratedPlanCore,
     InventoryLine,
     KpiFitResult,
@@ -21,7 +23,7 @@ import {
     RecommendedInventoryItem,
     Role,
 } from '../types/planner.types';
-import { CandidateResult, computeRateTier } from './planner.candidates';
+import { CandidateResult, computeRateTier, PLATFORM_LINE_MAP } from './planner.candidates';
 
 /** Normalizes a value into [0, 1] against the max in its set — 0 if every value in the set is 0. */
 const normalize = (value: number, max: number): number => (max > 0 ? value / max : 0);
@@ -165,9 +167,52 @@ const projectKpiFit = (
     return { metric, target, projected, verdict, comment: null };
 };
 
+/** The only feasibility check possible for a stated regional-delivery ask — see DeliveryFitResult's comment for why this can't be checked region by region. "meets" means the plan's real modelled delivery covers the stated total; "misses" means it falls meaningfully short. */
+const computeDeliveryFit = (
+    input: PlannerInput,
+    estimatedImpressions: number
+): DeliveryFitResult | null => {
+    if (input.campaign.regionalTargets.length === 0) return null;
+    const statedGoal = input.campaign.regionalTargets.reduce((sum, t) => sum + t.impressions, 0);
+    if (statedGoal <= 0) return null;
+
+    const ratio = estimatedImpressions / statedGoal;
+    const verdict = ratio >= 1 ? 'meets' : ratio >= 0.85 ? 'close' : 'misses';
+    return { statedGoal, projected: estimatedImpressions, verdict };
+};
+
+/**
+ * Checks each stated per-channel rate ask against the real blended CPM the engine actually
+ * found for that platform's line(s) — reusing PLATFORM_LINE_MAP so "which line does this
+ * platform mean" is resolved identically to candidate matching, not a second, possibly-
+ * inconsistent mapping. Weighted by each item's own real avails, not by the budget-derived
+ * amount/impressions on BudgetAllocationLine — those are 0 whenever no budget was given at
+ * all (a bare feasibility question, no spend to allocate), which would make this
+ * un-computable for exactly the case it exists to answer. Lower achieved CPM than asked is
+ * "meets" (cheaper than hoped), not "misses" — the ask is a ceiling, not an exact target.
+ */
+const computeCpmFit = (input: PlannerInput, budgetAllocation: BudgetAllocationLine[]): CpmFitResult[] => {
+    const results: CpmFitResult[] = [];
+    for (const { platform, maxCpm: target } of input.inventory.channelCpmTargets) {
+        const lines = PLATFORM_LINE_MAP[platform];
+        const items = budgetAllocation
+            .filter(l => lines.includes(l.inventoryLine))
+            .flatMap(l => l.recommendedInventory);
+        const totalAvails = items.reduce((sum, i) => sum + i.avails, 0);
+        if (totalAvails === 0) continue; // nothing selected for this platform at all
+
+        const weightedCpmSum = items.reduce((sum, i) => sum + i.cpm * i.avails, 0);
+        const actual = Math.round(weightedCpmSum / totalAvails);
+        const ratio = actual / target;
+        const verdict = ratio <= 1 ? 'meets' : ratio <= 1.15 ? 'close' : 'misses';
+        results.push({ platform, target, actual, verdict });
+    }
+    return results;
+};
+
 const PLATFORM_FOR_LINE: Record<InventoryLine, Platform> = {
     'ctv-fast': 'ctv-fast',
-    'ctv-ott': 'ctv',
+    'ctv-ott': 'ctv-ott',
     'mobile-ott': 'mobile-ott',
     websites: 'web',
     'in-app': 'in-app',
@@ -252,6 +297,8 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
     const kpiFit: KpiFitResult[] = input.campaign.kpis.map(k =>
         projectKpiFit(k.metric, k.target, allSelectedCandidates)
     );
+    const deliveryFit = computeDeliveryFit(input, estimatedImpressions);
+    const cpmFit = computeCpmFit(input, budgetAllocation);
 
     const plannedByTeam = candidates.unplannablePlatforms.map(platform => ({
         platform,
@@ -280,6 +327,8 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
         budgetAllocation,
         plannedByTeam,
         kpiFit,
+        deliveryFit,
+        cpmFit,
         buying: {
             dealType: input.buying.dealType,
             dspCompatible: input.buying.dspChoice !== null,

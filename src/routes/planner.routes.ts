@@ -15,7 +15,7 @@ router.post('/suggestions', authenticateBearer, validateBody(suggestPromptSchema
 // /plans (plural) generates and lists; /plan (singular) is the one place a new saved record
 // actually gets created, with a server-minted id (see planner.service.ts's create() comment
 // for why the id is never trusted from the caller here).
-router.post('/plans', authenticateBearer, validateBody(generatePlanSchema), plannerController.generate);
+router.post('/generate', authenticateBearer, validateBody(generatePlanSchema), plannerController.generate);
 router.get('/plans', authenticateBearer, plannerController.list);
 router.get('/plans/:planId', authenticateBearer, plannerController.getById);
 router.post('/plan', authenticateBearer, validateBody(savePlanSchema), plannerController.create);

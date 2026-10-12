@@ -56,6 +56,7 @@ export const buildEmptyPlannerInput = (): PlannerInput => ({
         campaignMonth: null,
         seasonality: null,
         pacing: null,
+        regionalTargets: [],
     },
     audience: {
         geoScope: null,
@@ -88,6 +89,7 @@ export const buildEmptyPlannerInput = (): PlannerInput => ({
         maxCpm: null,
         minAvails: null,
         minUniqueAudience: null,
+        channelCpmTargets: [],
     },
     creative: {
         displayFormats: [],
@@ -133,6 +135,16 @@ const FIELD_VALIDATORS: Record<string, (value: unknown) => boolean> = {
     'campaign.campaignMonth': v => typeof v === 'string',
     'campaign.seasonality': v => typeof v === 'string',
     'campaign.pacing': v => (PACINGS as readonly string[]).includes(v as string),
+    'campaign.regionalTargets': v =>
+        Array.isArray(v) &&
+        v.every(
+            t =>
+                typeof t === 'object' &&
+                t !== null &&
+                typeof (t as { region: string }).region === 'string' &&
+                typeof (t as { impressions: unknown }).impressions === 'number' &&
+                (t as { impressions: number }).impressions >= 0
+        ),
     'audience.geoScope': v => (GEO_SCOPES as readonly string[]).includes(v as string),
     'audience.states': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'audience.cities': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
@@ -162,6 +174,16 @@ const FIELD_VALIDATORS: Record<string, (value: unknown) => boolean> = {
     'inventory.maxCpm': v => typeof v === 'number' && v >= 0,
     'inventory.minAvails': v => typeof v === 'number' && v >= 0,
     'inventory.minUniqueAudience': v => typeof v === 'number' && v >= 0,
+    'inventory.channelCpmTargets': v =>
+        Array.isArray(v) &&
+        v.every(
+            t =>
+                typeof t === 'object' &&
+                t !== null &&
+                (PLATFORMS as readonly string[]).includes((t as { platform: string }).platform) &&
+                typeof (t as { maxCpm: unknown }).maxCpm === 'number' &&
+                (t as { maxCpm: number }).maxCpm >= 0
+        ),
     'creative.displayFormats': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'creative.displaySizes': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'creative.videoPlacements': v =>
@@ -198,9 +220,9 @@ const buildSuggestSchema = () =>
     });
 
 const FIELD_REFERENCE = `brand.name (text), brand.url (text, e.g. nykaa.com), brand.category (text — your own inference from the brand, not a fixed list), brand.competitors (text list)
-campaign.objective (one of: ${OBJECTIVES.join(', ')}), campaign.kpis (list of {"metric":"vcr"|"ctr","target":number|null} — ONLY these 2 metrics, nothing else), campaign.budget (number, INR, no shorthand — "50 Lakh" -> 5000000, "1 Crore" -> 10000000), campaign.startDate/campaign.endDate (YYYY-MM-DD), campaign.campaignMonth (YYYY-MM, only if exact dates aren't known), campaign.seasonality (text), campaign.pacing (one of: ${PACINGS.join(', ')})
+campaign.objective (one of: ${OBJECTIVES.join(', ')}), campaign.kpis (list of {"metric":"vcr"|"ctr","target":number|null} — ONLY these 2 metrics, nothing else), campaign.budget (number, INR, no shorthand — "50 Lakh" -> 5000000, "1 Crore" -> 10000000), campaign.startDate/campaign.endDate (YYYY-MM-DD), campaign.campaignMonth (YYYY-MM, only if exact dates aren't known), campaign.seasonality (text), campaign.pacing (one of: ${PACINGS.join(', ')}), campaign.regionalTargets (list of {"region":text,"impressions":number} — see the table-parsing rule below)
 audience.geoScope (one of: ${GEO_SCOPES.join(', ')}), audience.states/audience.cities/audience.excludeStates (text lists), audience.gender (one of: ${GENDERS.join(', ')}), audience.ageGroups (list from: ${AGE_GROUPS.join(', ')}), audience.affluenceSec (list from: ${AFFLUENCE_SECS.join(', ')}), audience.incomeBand (one of: ${INCOME_BANDS.join(', ')}), audience.interests/behaviours/lifeStage/languages (text lists), audience.audienceNotes (text)
-inventory.platforms (list from: ${PLATFORMS.join(', ')}), inventory.mediaTypes (list from: ${MEDIA_TYPES.join(', ')}), inventory.iabCategories (text list), inventory.contentGenres (text list), inventory.qualityTier (one of: ${QUALITY_TIERS.join(', ')}), inventory.preferredSitesApps/blockedSitesApps/mustInclude/categoriesToAvoid/brandSafetyExclusions (text lists), inventory.minViewabilityPct/minVcrPct (0-100), inventory.maxCpm (INR), inventory.minAvails/minUniqueAudience (numbers)
+inventory.platforms (list from: ${PLATFORMS.join(', ')} — "ctv-oem"/"ctv-fast" both mean ad-supported FAST channels like Samsung TV Plus/TCL Channel; "ctv-ott" means on-demand CTV apps like JioHotstar/ZEE5/MX Player; plain "ctv" means both), inventory.mediaTypes (list from: ${MEDIA_TYPES.join(', ')}), inventory.iabCategories (text list), inventory.contentGenres (text list), inventory.qualityTier (one of: ${QUALITY_TIERS.join(', ')}), inventory.preferredSitesApps/blockedSitesApps/mustInclude/categoriesToAvoid/brandSafetyExclusions (text lists), inventory.minViewabilityPct/minVcrPct (0-100), inventory.maxCpm (INR, a single overall cap — only use this when one CPM applies to everything), inventory.minAvails/minUniqueAudience (numbers), inventory.channelCpmTargets (list of {"platform":one of the platform values above,"maxCpm":number} — use this instead of maxCpm whenever different platforms are asked about at different rates, e.g. "₹130 for OTT-CTV, ₹100 for FAST")
 creative.displayFormats/displaySizes (text lists), creative.videoPlacements (list from: ${VIDEO_PLACEMENTS.join(', ')}), creative.videoPositions (list from: ${VIDEO_POSITIONS.join(', ')}), creative.videoDurations (list from: ${VIDEO_DURATIONS.join(', ')}), creative.skippability (list from: ${SKIPPABILITY.join(', ')})
 buying.dspChoice (one of: ${DSP_CHOICES.join(', ')}), buying.spendoptixDspRoute (one of: ${SPENDOPTIX_DSP_ROUTES.join(', ')}, only if dspChoice is spendoptix-dsp), buying.ownDspNames (text list, only if dspChoice is own-dsp), buying.seatId (text), buying.dealType (one of: ${DEAL_TYPES.join(', ')}), buying.frequencyCap ({"impressions":number,"period":"${FREQUENCY_CAP_PERIODS.join('"|"')}"})
 plannerSettings.optimiseFor (one of: ${OPTIMISE_FOR.join(', ')}, default balanced), plannerSettings.diversification (one of: ${DIVERSIFICATIONS.join(', ')}, default balanced), plannerSettings.maxRecommendationsPerLine (number, default 8)`;
@@ -216,6 +238,10 @@ For EVERY field, decide one of three provenance tags:
 Never skip a field because nothing was said — tag it "assumed" and give your best reasonable default instead. The one exception is "inventory.iabCategories" — only suggest one of these real categories: ${iabCategories.join(', ')} — or leave it unsuggested if genuinely nothing fits, since inventing one that doesn't exist in the real data defeats its purpose.
 
 Today's date is ${new Date().toISOString().slice(0, 10)}. The brief may give a date or date range with no year (e.g. "Oct 10 to Nov 5") — resolve it to this year if that date hasn't passed yet, or next year if it has; never resolve a bare date to a year that's already in the past relative to today.
+
+Any number with commas may use Indian lakh/crore grouping (2-digit groups after the first 3, not 3-digit Western groups) — e.g. "8,14,32,000" is NOT eight-hundred-fourteen-million. To remove any doubt, every comma-grouped number in the brief below has already been annotated with its exact digit value in brackets right after it, e.g. "8,14,32,000 [=81432000]" — always use that bracketed value as-is; never recompute it yourself, and never apply a lakh/crore multiplication on top of it.
+
+A brief may include a table of impression/avail targets broken down by region and platform (region names as rows, platform names as columns). Extract every row into "campaign.regionalTargets" as one entry per region — if a region has separate numbers per platform (e.g. separate OTT-CTV and FAST-CTV columns), sum them into that region's single total (using the comma-stripping method above for each number before summing), since this field tracks total delivery per region, not per platform-per-region. Never drop a stated row — an incomplete capture of real numbers defeats the point of this field far more than an approximate one does.
 
 Fields and their types/allowed values:
 ${FIELD_REFERENCE}
@@ -259,6 +285,15 @@ export interface SuggestResult {
 }
 
 /**
+ * Bedrock models consistently misread Indian lakh/crore comma-grouped numbers (observed ~10x
+ * inflation) even when told to "strip commas and read digits" — they do their own semantic
+ * grouping math anyway. Since stripping commas is a deterministic, mechanical operation, do it
+ * in code and hand the model the literal value alongside the original so it never has to.
+ */
+const annotateCommaGroupedNumbers = (text: string): string =>
+    text.replace(/\b\d{1,3}(?:,\d{1,3})+\b/g, match => `${match} [=${match.replace(/,/g, '')}]`);
+
+/**
  * Call 1 ("suggest") — the brief is free text and can be messy/incomplete, so every field gets
  * filled one way or another (stated/inferred/assumed) rather than left blank for the user to
  * notice and fill in themselves. Call 2 ("generate") then runs on whatever the user vets this
@@ -270,7 +305,7 @@ export const generateSuggestions = async (
 ): Promise<SuggestResult> => {
     const result = await generateStructured<ReturnType<typeof buildSuggestSchema>>({
         system: buildSuggestSystemPrompt(iabCategories),
-        prompt: `Brief:\n"""\n${prompt}\n"""`,
+        prompt: `Brief:\n"""\n${annotateCommaGroupedNumbers(prompt)}\n"""`,
         schema: buildSuggestSchema(),
         maxTokens: 4096,
     });
@@ -388,11 +423,22 @@ export const generateNarration = async (
     input: PlannerInput,
     core: GeneratedPlanCore
 ): Promise<PlanNarration> => {
+    // One fixed ceiling broke in production on a larger plan: "itemReasons" needs one sentence
+    // per recommended item across every line (up to maxRecommendationsPerLine × number of
+    // lines), so a plan with ~30 items overflowed a flat 2048 and got cut off mid-JSON-string,
+    // which failed to parse. Scale with the actual item count instead of guessing one number
+    // that happens to fit today's test plans.
+    const totalItems = core.budgetAllocation.reduce(
+        (sum, line) => sum + line.recommendedInventory.length,
+        0
+    );
+    const maxTokens = Math.min(8192, 1536 + totalItems * 100);
+
     const result = await generateStructured<ReturnType<typeof buildNarrationSchema>>({
         system: buildNarrationSystemPrompt(),
         prompt: buildNarrationPrompt(input, core),
         schema: buildNarrationSchema(),
-        maxTokens: 2048,
+        maxTokens,
         temperature: 0.2,
     });
 
@@ -552,6 +598,8 @@ export const mergePlan = (
     brandSafety: core.brandSafety,
     checks: {
         kpiFit: core.kpiFit,
+        deliveryFit: core.deliveryFit,
+        cpmFit: core.cpmFit,
         assumptions: narration.assumptions,
     },
 });

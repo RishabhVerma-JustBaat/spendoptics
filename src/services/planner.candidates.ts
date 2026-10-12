@@ -14,12 +14,14 @@ const prisma = new PrismaClient();
  * CTV inventory), so this maps to an array, not a single line. "Can keep changing" per product
  * direction, so this is a lookup table, not inlined branching.
  */
-const PLATFORM_LINE_MAP: Record<Platform, InventoryLine[]> = {
+export const PLATFORM_LINE_MAP: Record<Platform, InventoryLine[]> = {
     ctv: ['ctv-fast', 'ctv-ott'],
     // The ingested data's "OEM" type is the closest real proxy to "FAST channel" — see
-    // planner.types.ts's INVENTORY_LINES comment for why.
+    // planner.types.ts's INVENTORY_LINES comment for why. "ctv-oem" and "ctv-fast" are
+    // synonyms (see PLATFORMS's comment); "ctv-ott" is the distinct on-demand pool.
     'ctv-oem': ['ctv-fast'],
     'ctv-fast': ['ctv-fast'],
+    'ctv-ott': ['ctv-ott'],
     'mobile-ott': ['mobile-ott'],
     web: ['websites'],
     mweb: ['websites'],
@@ -126,7 +128,7 @@ const fetchCtvCandidates = async (input: PlannerInput, tier: RateTier): Promise<
             // TCL Channel) — a real proxy for "FAST channel", not an invented split. See
             // planner.types.ts's INVENTORY_LINES comment.
             line: (r.type === 'OEM' ? 'ctv-fast' : 'ctv-ott') as InventoryLine,
-            platform: (r.type === 'OEM' ? 'ctv-fast' : 'ctv') as Platform,
+            platform: (r.type === 'OEM' ? 'ctv-fast' : 'ctv-ott') as Platform,
             avails: Number(r.totalImpressions),
             uniqueAudience: Number(r.totalUniques),
             cpm: r[cpmColumn],
@@ -272,6 +274,7 @@ const PLATFORMS_ALL: Platform[] = [
     'ctv',
     'ctv-oem',
     'ctv-fast',
+    'ctv-ott',
     'mobile-ott',
     'web',
     'mweb',
