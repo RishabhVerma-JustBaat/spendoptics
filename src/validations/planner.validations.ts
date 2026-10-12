@@ -21,7 +21,7 @@ import {
     VIDEO_DURATIONS,
     VIDEO_PLACEMENTS,
     VIDEO_POSITIONS,
-} from '../types/ai-planner.types';
+} from '../types/planner.types';
 
 // Every field is optional per the product spec ("Every input field is optional. Anything
 // missing is filled with a sensible default") — Call 1 ("suggest") is what's expected to
@@ -35,18 +35,32 @@ export const suggestPromptSchema = Joi.object({
     prompt: Joi.string().trim().min(1).max(20000).required(),
 });
 
+// Loose on purpose — `input`/`plan` are round-tripped from what POST /plans itself just
+// returned moments earlier (or a locally-edited copy of it), not re-validated field by field;
+// the save envelope's own inner blocks aren't shape-constrained at all beyond being an object
+// (see plan.types.ts), so there's nothing stricter to gain by re-checking shape here.
+export const savePlanSchema = Joi.object({
+    input: Joi.object().unknown(true).required(),
+    plan: Joi.object().unknown(true).required(),
+});
+
+// Every nullable field also carries .empty('') — caught live: the suggest call (Call 1) can
+// return an empty string for a field it had no real value for (e.g. brand.url) rather than a
+// clean null, and .allow(null) alone doesn't accept '' as a value. .empty('') treats '' as
+// "absent", which then falls through to each field's own .default(null) instead of failing
+// validation outright.
 export const generatePlanSchema = Joi.object({
     brand: Joi.object({
-        name: Joi.string().allow(null).default(null),
-        url: Joi.string().allow(null).default(null),
-        category: Joi.string().allow(null).default(null),
+        name: Joi.string().allow(null).empty('').default(null),
+        url: Joi.string().allow(null).empty('').default(null),
+        category: Joi.string().allow(null).empty('').default(null),
         competitors: stringArray,
     }).default(),
 
     campaign: Joi.object({
         objective: Joi.string()
             .valid(...OBJECTIVES)
-            .allow(null)
+            .allow(null).empty('')
             .default(null),
         kpis: Joi.array()
             .items(
@@ -54,32 +68,32 @@ export const generatePlanSchema = Joi.object({
                     metric: Joi.string()
                         .valid(...KPI_METRICS)
                         .required(),
-                    target: Joi.number().allow(null).default(null),
+                    target: Joi.number().allow(null).empty('').default(null),
                 })
             )
             .default([]),
-        budget: Joi.number().integer().min(0).allow(null).default(null),
-        startDate: Joi.string().isoDate().allow(null).default(null),
-        endDate: Joi.string().isoDate().allow(null).default(null),
-        campaignMonth: Joi.string().allow(null).default(null),
-        seasonality: Joi.string().allow(null).default(null),
+        budget: Joi.number().integer().min(0).allow(null).empty('').default(null),
+        startDate: Joi.string().isoDate().allow(null).empty('').default(null),
+        endDate: Joi.string().isoDate().allow(null).empty('').default(null),
+        campaignMonth: Joi.string().allow(null).empty('').default(null),
+        seasonality: Joi.string().allow(null).empty('').default(null),
         pacing: Joi.string()
             .valid(...PACINGS)
-            .allow(null)
+            .allow(null).empty('')
             .default(null),
     }).default(),
 
     audience: Joi.object({
         geoScope: Joi.string()
             .valid(...GEO_SCOPES)
-            .allow(null)
+            .allow(null).empty('')
             .default(null),
         states: stringArray,
         cities: stringArray,
         excludeStates: stringArray,
         gender: Joi.string()
             .valid(...GENDERS)
-            .allow(null)
+            .allow(null).empty('')
             .default(null),
         ageGroups: Joi.array()
             .items(Joi.string().valid(...AGE_GROUPS))
@@ -89,13 +103,13 @@ export const generatePlanSchema = Joi.object({
             .default([]),
         incomeBand: Joi.string()
             .valid(...INCOME_BANDS)
-            .allow(null)
+            .allow(null).empty('')
             .default(null),
         interests: stringArray,
         behaviours: stringArray,
         lifeStage: stringArray,
         languages: stringArray,
-        audienceNotes: Joi.string().allow(null).default(null),
+        audienceNotes: Joi.string().allow(null).empty('').default(null),
     }).default(),
 
     inventory: Joi.object({
@@ -109,18 +123,18 @@ export const generatePlanSchema = Joi.object({
         contentGenres: stringArray,
         qualityTier: Joi.string()
             .valid(...QUALITY_TIERS)
-            .allow(null)
+            .allow(null).empty('')
             .default(null),
         preferredSitesApps: stringArray,
         blockedSitesApps: stringArray,
         mustInclude: stringArray,
         categoriesToAvoid: stringArray,
         brandSafetyExclusions: stringArray,
-        minViewabilityPct: Joi.number().min(0).max(100).allow(null).default(null),
-        minVcrPct: Joi.number().min(0).max(100).allow(null).default(null),
-        maxCpm: Joi.number().min(0).allow(null).default(null),
-        minAvails: Joi.number().integer().min(0).allow(null).default(null),
-        minUniqueAudience: Joi.number().integer().min(0).allow(null).default(null),
+        minViewabilityPct: Joi.number().min(0).max(100).allow(null).empty('').default(null),
+        minVcrPct: Joi.number().min(0).max(100).allow(null).empty('').default(null),
+        maxCpm: Joi.number().min(0).allow(null).empty('').default(null),
+        minAvails: Joi.number().integer().min(0).allow(null).empty('').default(null),
+        minUniqueAudience: Joi.number().integer().min(0).allow(null).empty('').default(null),
     }).default(),
 
     creative: Joi.object({
@@ -143,17 +157,17 @@ export const generatePlanSchema = Joi.object({
     buying: Joi.object({
         dspChoice: Joi.string()
             .valid(...DSP_CHOICES)
-            .allow(null)
+            .allow(null).empty('')
             .default(null),
         spendoptixDspRoute: Joi.string()
             .valid(...SPENDOPTIX_DSP_ROUTES)
-            .allow(null)
+            .allow(null).empty('')
             .default(null),
         ownDspNames: stringArray,
-        seatId: Joi.string().allow(null).default(null),
+        seatId: Joi.string().allow(null).empty('').default(null),
         dealType: Joi.string()
             .valid(...DEAL_TYPES)
-            .allow(null)
+            .allow(null).empty('')
             .default(null),
         frequencyCap: Joi.object({
             impressions: Joi.number().integer().min(1).required(),
@@ -161,7 +175,7 @@ export const generatePlanSchema = Joi.object({
                 .valid(...FREQUENCY_CAP_PERIODS)
                 .required(),
         })
-            .allow(null)
+            .allow(null).empty('')
             .default(null),
     }).default(),
 

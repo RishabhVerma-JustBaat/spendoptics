@@ -5,7 +5,7 @@ import {
     Platform,
     PlannerInput,
     RateTier,
-} from '../types/ai-planner.types';
+} from '../types/planner.types';
 
 const prisma = new PrismaClient();
 

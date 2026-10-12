@@ -1,13 +1,13 @@
 /**
  * Stage 2+3 of Call 2 ("generate") — deterministic selection, ranking, and budget allocation
- * across the real candidate shortlist (candidate-inventory.service.ts), plus every numeric
+ * across the real candidate shortlist (planner.candidates.ts), plus every numeric
  * output (reach, impressions, CPM, kpi_fit). None of this is an LLM call.
  *
  * Why: an LLM asked to both pick inventory AND decide how much budget goes where introduces
  * run-to-run variance into the actual plan, not just its wording — the same input could
  * recommend a different site or a different split on a re-run. Scoring and allocation are
  * formulas instead, so the same input always produces the same plan; the one remaining LLM
- * call (ai-planner-prompts.ts's narration call) only writes text describing decisions already
+ * call (planner.prompts.ts's narration call) only writes text describing decisions already
  * made here, which bounds any variance to phrasing.
  */
 import {
@@ -20,8 +20,8 @@ import {
     PlannerInput,
     RecommendedInventoryItem,
     Role,
-} from '../types/ai-planner.types';
-import { CandidateResult, computeRateTier } from './candidate-inventory.service';
+} from '../types/planner.types';
+import { CandidateResult, computeRateTier } from './planner.candidates';
 
 /** Normalizes a value into [0, 1] against the max in its set — 0 if every value in the set is 0. */
 const normalize = (value: number, max: number): number => (max > 0 ? value / max : 0);

@@ -5,9 +5,9 @@
  * allocation.service.ts's buildPlanCore at several budget levels against the same shortlist —
  * the "range of budgets around the one the user gave" approach, not a fitted formula.
  */
-import { CandidateResult } from './candidate-inventory.service';
+import { CandidateResult } from './planner.candidates';
 import { buildPlanCore } from './allocation.service';
-import { PlannerInput } from '../types/ai-planner.types';
+import { PlannerInput } from '../types/planner.types';
 
 export interface CpmCurvePoint {
     cpmCap: number;

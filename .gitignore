@@ -4,3 +4,6 @@ lib/
 *.log
 .firebase/
 *-firebase-adminsdk*.json
+
+# AWS CloudTrail export — contains account ID, IAM usernames, access key IDs, source IPs
+cloudtrail_createuser.json

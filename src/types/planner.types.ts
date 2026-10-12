@@ -2,10 +2,10 @@
  * Types for the new two-call AI Planner flow (replaces the old single-call /plan/analyse):
  * Call 1 ("suggest") turns a free-text prompt into pre-filled, provenance-tagged form fields;
  * the user vets them; Call 2 ("generate") takes the vetted form and produces the actual plan.
- * This file covers Call 2's input/output shapes — see ai-planner-prompts.ts for Call 1.
+ * This file covers Call 2's input/output shapes — see planner.prompts.ts (the "Call 1" section) for Call 1.
  *
  * Every number and every selection/allocation decision in the Call 2 output is computed
- * deterministically in code (candidate-inventory.service.ts / allocation.service.ts), never
+ * deterministically in code (planner.candidates.ts / allocation.service.ts), never
  * by an LLM — the only LLM involvement left is narration text wrapped around decisions
  * already made. See allocation.service.ts's top comment for why.
  */
@@ -218,7 +218,7 @@ export interface KpiFitResult {
     comment: string | null;
 }
 
-/** The deterministic core of the plan — everything here is computed by allocation.service.ts, zero LLM involvement. Narration (title/summary/reason/assumptions/confidence text) gets merged in afterward by ai-planner-prompts.ts's narration call. */
+/** The deterministic core of the plan — everything here is computed by allocation.service.ts, zero LLM involvement. Narration (title/summary/reason/assumptions/confidence text) gets merged in afterward by planner.prompts.ts's narration call. */
 export interface GeneratedPlanCore {
     keyFigures: {
         estimatedReach: number;
@@ -261,7 +261,7 @@ export type TargetGroupType = (typeof TARGET_GROUP_TYPES)[number];
 export interface RecommendedWindow {
     startDate: string;
     endDate: string;
-    /** AI's own judgment, 0-100 — not system-computed, since there's no avails-history/events data to compute it from. One deliberate exception to "every number is deterministic" — see ai-planner-prompts.ts's narration call comment. */
+    /** AI's own judgment, 0-100 — not system-computed, since there's no avails-history/events data to compute it from. One deliberate exception to "every number is deterministic" — see planner.prompts.ts's narration call comment. */
     score: number;
     reason: string;
 }
@@ -272,7 +272,7 @@ export interface BestDates {
     givenVsBest: string | null;
 }
 
-/** Narration text wrapped around a GeneratedPlanCore that's already fully decided — see allocation.service.ts's top comment. Produced by ai-planner-prompts.ts's narration call. */
+/** Narration text wrapped around a GeneratedPlanCore that's already fully decided — see allocation.service.ts's top comment. Produced by planner.prompts.ts's narration call. */
 export interface PlanNarration {
     title: string;
     summary: string;
@@ -283,7 +283,7 @@ export interface PlanNarration {
     bestDates: BestDates;
 }
 
-/** Written after the curves are computed, since it has to describe their actual numbers — see ai-planner-prompts.ts's curve-commentary call. */
+/** Written after the curves are computed, since it has to describe their actual numbers — see planner.prompts.ts's curve-commentary call. */
 export interface CurveCommentary {
     givenVsRecommendedBudgetReason: string | null;
     givenVsRecommendedCpmReason: string | null;

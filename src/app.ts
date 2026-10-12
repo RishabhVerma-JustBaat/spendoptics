@@ -7,9 +7,7 @@ import cookieParser from 'cookie-parser';
 import { config } from './config/environment';
 import { errorHandler } from './middleware/errorHandler';
 import { requestLogger } from './middleware/requestLogger';
-import { planRoutes } from './routes/plan.routes';
-import { mediaPlanRoutes } from './routes/media-plan.routes';
-import { aiPlannerRoutes } from './routes/ai-planner.routes';
+import { plannerRoutes } from './routes/planner.routes';
 
 // The raw Express app, shared by both hosting modes: functions/api/spendoptix_api.ts wraps
 // it for Firebase Functions, server.ts calls app.listen() directly for standalone/PM2 hosting.
@@ -27,13 +25,10 @@ app.use(express.urlencoded({ extended: true }));
 app.use(morgan(config.isDebug ? 'dev' : 'combined'));
 app.use(requestLogger);
 
-app.use('/plan', planRoutes);
-app.use('/media-plans', mediaPlanRoutes);
-// Versioned — a clean-slate route, unlike the legacy, unversioned routes above it.
-app.use('/api/v1/planner', aiPlannerRoutes);
+app.use('/api/v1/planner', plannerRoutes);
 
-// A small static test page for hitting /plan/analyse and /media-plans without Postman —
-// same-origin as the API, so it needs no CORS setup and no extra hosting of its own.
+// A small static test page for hitting the API without Postman — same-origin, so it needs no
+// CORS setup and no extra hosting of its own.
 // process.cwd()-relative, same reasoning as server.ts's service-account path: PM2 runs
 // this with cwd = project root, where the public/ folder actually lives.
 app.use('/tester', express.static(path.resolve(process.cwd(), 'public')));
