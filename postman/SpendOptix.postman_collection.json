@@ -1,13 +1,13 @@
 {
     "info": {
-        "name": "SpendOptix Backend",
-        "description": "Brief analysis (Bedrock Claude) and media plan persistence. Set {{baseUrl}} and {{authToken}} in the collection/environment variables — every route except health checks requires a valid Firebase ID token (project: justbaat-apps) as a Bearer token.",
+        "name": "SpendOptix AI Planner",
+        "description": "Two-step AI planner (suggest -> generate) plus plan persistence (create/save/list/get/approve). Set {{baseUrl}} and {{authToken}} in the collection/environment variables — every route except health checks requires a Bearer token: a real Firebase ID token (project: justbaat-apps), or the static test token already filled in below (doesn't expire).\n\nTypical flow: 1) Suggestions (prompt -> pre-filled form) -> 2) have the user review/edit the \"input\" it returns -> 3) Generate a plan (plans -> POST) from that input -> 4) Create (plan -> POST) to save it with a server-generated id, or Update if you already have one.",
         "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
     },
     "variable": [
         { "key": "baseUrl", "value": "https://onespend.worldnewscorp.com" },
-        { "key": "authToken", "value": "" },
-        { "key": "planId", "value": "8f3c1d2e-demo-plan-0001" }
+        { "key": "authToken", "value": "z9jaH0nG24PyfcvtdwsWnhpm7Ve9aRCc" },
+        { "key": "planId", "value": "" }
     ],
     "auth": {
         "type": "bearer",
@@ -18,15 +18,7 @@
             "name": "Health",
             "item": [
                 {
-                    "name": "Root health check",
-                    "request": {
-                        "method": "GET",
-                        "url": "{{baseUrl}}/",
-                        "auth": { "type": "noauth" }
-                    }
-                },
-                {
-                    "name": "Health",
+                    "name": "Health check",
                     "request": {
                         "method": "GET",
                         "url": "{{baseUrl}}/health",
@@ -36,30 +28,18 @@
             ]
         },
         {
-            "name": "Plan",
+            "name": "1. Suggestions (Call 1)",
             "item": [
                 {
-                    "name": "Analyse brief — campaign-brief",
+                    "name": "Suggest form fields from a prompt",
                     "request": {
                         "method": "POST",
-                        "url": "{{baseUrl}}/plan/analyse",
+                        "url": "{{baseUrl}}/api/v1/planner/suggestions",
                         "header": [{ "key": "Content-Type", "value": "application/json" }],
+                        "description": "Free text in, a fully pre-filled form out (every field, never blank) plus a provenance tag per field: \"stated\" (literally in the prompt), \"inferred\" (worked out from context), or \"assumed\" (no signal at all, a plausible default). The response's \"data.input\" is exactly what you'd send to Generate below, after the user reviews/edits it.",
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"brief\": \"Spotify India — audio campaign, Tier 1 metros (Delhi, Mumbai, Bangalore, Hyderabad, Chennai, Kolkata, Ahmedabad).\\nBudget: 50 Lakh. Flight: Oct 1 to Oct 30, 2026.\\nTargeting: Male skew, 25-54. Placements: Spotify & JioSaavn.\\nObjective is reach maximization. Frequency cap 3x per week.\",\n  \"type\": \"campaign-brief\",\n  \"context\": {\n    \"country\": \"IN\",\n    \"channels\": [\"ctv\", \"mobile-ott\", \"web-display\", \"audio\", \"dooh\"],\n    \"objectives\": [\"awareness\", \"conversions\", \"reach-maximization\"],\n    \"kpis\": [\"CPM\", \"CTR\", \"VTR\", \"reach\"]\n  }\n}",
-                            "options": { "raw": { "language": "json" } }
-                        }
-                    }
-                },
-                {
-                    "name": "Analyse brief — inventory-rfp",
-                    "request": {
-                        "method": "POST",
-                        "url": "{{baseUrl}}/plan/analyse",
-                        "header": [{ "key": "Content-Type", "value": "application/json" }],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"brief\": \"Could you please check the inventory availability for SunNXT, specifically for the Tamil Nadu region (automotive category). We plan to target audiences internally via DSP - could you please check if we can still hit the 4M impression goal with the targeting. Additionally, please let us know the CPM for Mobile and CTV separately and the expected VTRs for 30 secs creative.\",\n  \"type\": \"inventory-rfp\",\n  \"context\": {\n    \"country\": \"IN\",\n    \"channels\": [\"ctv\", \"mobile-ott\", \"web-display\", \"audio\", \"dooh\"],\n    \"objectives\": [],\n    \"kpis\": []\n  }\n}",
+                            "raw": "{\n  \"prompt\": \"We want to run a reach campaign for Nyka, targeting women 25-34 interested in beauty, around 50 Lakh budget, premium CTV and OTT inventory, PAN India.\"\n}",
                             "options": { "raw": { "language": "json" } }
                         }
                     }
@@ -67,45 +47,79 @@
             ]
         },
         {
-            "name": "Media Plans",
+            "name": "2. Plans (Call 2 - generate, list, fetch)",
             "item": [
                 {
-                    "name": "List media plans",
-                    "request": {
-                        "method": "GET",
-                        "url": {
-                            "raw": "{{baseUrl}}/media-plans?limit=20",
-                            "host": ["{{baseUrl}}"],
-                            "path": ["media-plans"],
-                            "query": [{ "key": "limit", "value": "20" }]
-                        }
-                    }
-                },
-                {
-                    "name": "Save (upsert) a media plan",
+                    "name": "Generate a plan",
                     "request": {
                         "method": "POST",
-                        "url": "{{baseUrl}}/media-plans",
+                        "url": "{{baseUrl}}/api/v1/planner/plans",
                         "header": [{ "key": "Content-Type", "value": "application/json" }],
+                        "description": "Every field is optional (sensible defaults apply) — this is the full PlannerInput shape with everything filled in as an example. Nothing is persisted by this call; it returns a GeneratedPlan (header, keyFigures, flight, bestDates, budgetCurve, cpmCurve, benefitSummary, budgetAllocation, plannedByTeam, audience, buying, brandSafety, checks). Save it afterward with \"Create a plan\" below if you want to keep it.\n\nAllowed enum values:\n- campaign.objective: awareness, reach, consideration, video-views, traffic, app-installs, leads, sales\n- campaign.kpis[].metric: vcr, ctr (only these two)\n- campaign.pacing: even, front-loaded, back-loaded, burst\n- audience.geoScope: pan-india, states, cities\n- audience.gender: all, male, female\n- audience.ageGroups: 18-24, 25-34, 35-44, 45-54, 55-64, 65+\n- audience.affluenceSec: A, B, C, D, E\n- audience.incomeBand: premium, upper-mid, mid, mass\n- inventory.platforms: ctv, ctv-oem, ctv-fast, mobile-ott, web, mweb, in-app, youtube\n- inventory.mediaTypes: display, video\n- inventory.qualityTier: premium-only, premium-preferred, any\n- inventory.iabCategories: must match one of the real categories in the ingested data (fetched live from the server — ask backend for the current list, e.g. \"Beauty & Fitness\", \"Finance\", \"News\", \"Shopping\", ...)\n- creative.videoPlacements: instream, outstream, interstitial\n- creative.videoPositions: preroll, midroll, postroll\n- creative.videoDurations: under-10s, under-30s, up-to-60s\n- creative.skippability: skippable, non-skippable\n- buying.dspChoice: spendoptix-dsp, own-dsp\n- buying.spendoptixDspRoute: dv360, authorised-buyer\n- buying.dealType: pmp, programmatic-guaranteed, preferred-deal, open-auction, any\n- buying.frequencyCap.period: day, week, month, campaign\n- plannerSettings.optimiseFor: reach, cost-efficiency, quality, viewability, balanced\n- plannerSettings.diversification: concentrated, balanced, broad",
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"schemaVersion\": 1,\n  \"planId\": \"{{planId}}\",\n  \"source\": { \"app\": \"spendoptix-console\", \"trigger\": \"summary-step\" },\n  \"brief\": {\n    \"text\": \"Spotify India — audio campaign, Tier 1 metros. Budget 50 Lakh, Oct 1-30 2026, male 25-54.\",\n    \"parsed\": {},\n    \"answers\": { \"kpi\": \"A\", \"product\": \"D\" }\n  },\n  \"campaign\": {\n    \"name\": \"Spotify India — Audio, Tier 1 Metros\",\n    \"advertiser\": \"Spotify\",\n    \"product\": null,\n    \"objective\": \"reach-maximization\",\n    \"kpi\": \"CPM\",\n    \"budget\": 5000000,\n    \"currency\": \"INR\",\n    \"flight\": { \"start\": \"2026-10-01\", \"end\": \"2026-10-30\", \"durationDays\": 30 }\n  },\n  \"market\": {\n    \"country\": \"IN\",\n    \"geos\": [\"Delhi\", \"Mumbai\", \"Bangalore\", \"Hyderabad\", \"Chennai\", \"Kolkata\", \"Ahmedabad\"]\n  },\n  \"audience\": {\n    \"basis\": \"modelled\",\n    \"gender\": [{ \"label\": \"Male\", \"percent\": 68 }, { \"label\": \"Female\", \"percent\": 32 }],\n    \"age\": [{ \"label\": \"25-34\", \"percent\": 42 }, { \"label\": \"35-44\", \"percent\": 35 }, { \"label\": \"45-54\", \"percent\": 23 }],\n    \"geo\": [{ \"label\": \"Delhi\", \"percent\": 28 }, { \"label\": \"Mumbai\", \"percent\": 26 }]\n  },\n  \"inventory\": {\n    \"source\": \"brief\",\n    \"rows\": 3,\n    \"available\": { \"impressions\": 8500000, \"uniques\": 2100000 },\n    \"channels\": [\n      { \"id\": \"audio\", \"name\": \"Digital Audio\", \"allocation\": 100, \"amount\": 5000000, \"rows\": 3, \"impressions\": 8500000, \"uniques\": 2100000 }\n    ],\n    \"publishers\": [\n      { \"name\": \"Spotify\", \"rows\": 2, \"impressions\": 6000000 },\n      { \"name\": \"JioSaavn\", \"rows\": 1, \"impressions\": 2500000 }\n    ],\n    \"topSites\": [],\n    \"unmatchedTerms\": []\n  },\n  \"forecast\": {\n    \"basis\": \"allocation-share-of-available\",\n    \"impressions\": 8500000,\n    \"reach\": 2100000,\n    \"availableImpressions\": 8500000,\n    \"availableUniques\": 2100000,\n    \"goal\": null\n  }\n}",
+                            "raw": "{\n  \"brand\": {\n    \"name\": \"Nyka\",\n    \"url\": \"nykaa.com\",\n    \"category\": \"Beauty & Personal Care\",\n    \"competitors\": [\"Mamaearth\", \"Sugar Cosmetics\"]\n  },\n  \"campaign\": {\n    \"objective\": \"reach\",\n    \"kpis\": [\n      { \"metric\": \"vcr\", \"target\": 65 },\n      { \"metric\": \"ctr\", \"target\": 2 }\n    ],\n    \"budget\": 5000000,\n    \"startDate\": \"2026-11-01\",\n    \"endDate\": \"2026-11-30\",\n    \"campaignMonth\": null,\n    \"seasonality\": \"Diwali\",\n    \"pacing\": \"even\"\n  },\n  \"audience\": {\n    \"geoScope\": \"pan-india\",\n    \"states\": [],\n    \"cities\": [],\n    \"excludeStates\": [],\n    \"gender\": \"female\",\n    \"ageGroups\": [\"25-34\", \"35-44\"],\n    \"affluenceSec\": [\"A\", \"B\"],\n    \"incomeBand\": \"premium\",\n    \"interests\": [\"beauty\", \"fashion\"],\n    \"behaviours\": [],\n    \"lifeStage\": [],\n    \"languages\": [\"English\", \"Hindi\"],\n    \"audienceNotes\": null\n  },\n  \"inventory\": {\n    \"platforms\": [\"ctv\", \"mobile-ott\", \"web\", \"in-app\"],\n    \"mediaTypes\": [\"display\", \"video\"],\n    \"iabCategories\": [\"Beauty & Fitness\"],\n    \"contentGenres\": [],\n    \"qualityTier\": \"premium-preferred\",\n    \"preferredSitesApps\": [],\n    \"blockedSitesApps\": [],\n    \"mustInclude\": [],\n    \"categoriesToAvoid\": [],\n    \"brandSafetyExclusions\": [],\n    \"minViewabilityPct\": null,\n    \"minVcrPct\": null,\n    \"maxCpm\": 250,\n    \"minAvails\": null,\n    \"minUniqueAudience\": null\n  },\n  \"creative\": {\n    \"displayFormats\": [],\n    \"displaySizes\": [],\n    \"videoPlacements\": [\"instream\"],\n    \"videoPositions\": [\"preroll\"],\n    \"videoDurations\": [\"under-30s\"],\n    \"skippability\": [\"skippable\"]\n  },\n  \"buying\": {\n    \"dspChoice\": \"spendoptix-dsp\",\n    \"spendoptixDspRoute\": \"dv360\",\n    \"ownDspNames\": [],\n    \"seatId\": null,\n    \"dealType\": \"pmp\",\n    \"frequencyCap\": { \"impressions\": 5, \"period\": \"week\" }\n  },\n  \"plannerSettings\": {\n    \"optimiseFor\": \"balanced\",\n    \"diversification\": \"balanced\",\n    \"maxRecommendationsPerLine\": 8\n  }\n}",
                             "options": { "raw": { "language": "json" } }
                         }
                     }
                 },
                 {
-                    "name": "Get media plan by id",
+                    "name": "List saved plans",
                     "request": {
                         "method": "GET",
-                        "url": "{{baseUrl}}/media-plans/{{planId}}"
+                        "url": {
+                            "raw": "{{baseUrl}}/api/v1/planner/plans?limit=20",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["api", "v1", "planner", "plans"],
+                            "query": [{ "key": "limit", "value": "20" }]
+                        }
                     }
                 },
                 {
-                    "name": "Approve media plan",
+                    "name": "Get a saved plan by id",
+                    "request": {
+                        "method": "GET",
+                        "url": "{{baseUrl}}/api/v1/planner/plans/{{planId}}"
+                    }
+                },
+                {
+                    "name": "Approve a saved plan",
                     "request": {
                         "method": "POST",
-                        "url": "{{baseUrl}}/media-plans/{{planId}}/approve"
+                        "url": "{{baseUrl}}/api/v1/planner/plans/{{planId}}/approve"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "3. Plan (create / update)",
+            "item": [
+                {
+                    "name": "Create a plan (server generates the id)",
+                    "request": {
+                        "method": "POST",
+                        "url": "{{baseUrl}}/api/v1/planner/plan",
+                        "header": [{ "key": "Content-Type", "value": "application/json" }],
+                        "description": "Body is {\"input\", \"plan\"} — the exact two objects from Suggestions' \"data.input\" (as sent to Generate) and Generate's \"data\" response, unmodified. The server mints a UUID and returns it as \"id\" (201 Created) — paste that into the {{planId}} collection variable to use the requests below it. This is the only place a new saved record gets created; nothing here trusts a caller-supplied id.",
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"input\": { \"...\": \"paste the exact body you sent to Generate\" },\n  \"plan\": { \"...\": \"paste the exact \\\"data\\\" object Generate returned\" }\n}",
+                            "options": { "raw": { "language": "json" } }
+                        }
+                    }
+                },
+                {
+                    "name": "Update a plan ({{planId}})",
+                    "request": {
+                        "method": "PUT",
+                        "url": "{{baseUrl}}/api/v1/planner/plans/{{planId}}",
+                        "header": [{ "key": "Content-Type", "value": "application/json" }],
+                        "description": "Same body shape as Create, but for a planId you already have (e.g. re-saving after the user edits something). Upsert — creates it if that id doesn't exist yet, replaces it if it does.",
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"input\": { \"...\": \"paste the exact body you sent to Generate\" },\n  \"plan\": { \"...\": \"paste the exact \\\"data\\\" object Generate returned\" }\n}",
+                            "options": { "raw": { "language": "json" } }
+                        }
                     }
                 }
             ]
