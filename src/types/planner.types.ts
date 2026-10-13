@@ -202,6 +202,9 @@ export interface RecommendedInventoryItem {
     uniqueAudience: number | null;
     cpm: number;
     vcr: number | null;
+    /** This item's own share of the line's budget/impressions — 0 for both when no campaign.budget was given at all, same as the line-level totals they're drawn from. */
+    amount: number;
+    impressions: number;
 }
 
 export interface BudgetAllocationLine {

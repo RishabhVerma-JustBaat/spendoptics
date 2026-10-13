@@ -1,0 +1,9 @@
+-- AlterTable
+ALTER TABLE "inventory_websites" ADD COLUMN     "age_18_24_pct" DOUBLE PRECISION,
+ADD COLUMN     "age_25_34_pct" DOUBLE PRECISION,
+ADD COLUMN     "age_35_44_pct" DOUBLE PRECISION,
+ADD COLUMN     "age_45_54_pct" DOUBLE PRECISION,
+ADD COLUMN     "age_55_plus_pct" DOUBLE PRECISION,
+ADD COLUMN     "ctr_vcr" DOUBLE PRECISION,
+ADD COLUMN     "gender_female_pct" DOUBLE PRECISION,
+ADD COLUMN     "gender_male_pct" DOUBLE PRECISION;

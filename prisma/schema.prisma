@@ -140,12 +140,29 @@ model InventoryWebsite {
   iabCategories     String[] @map("iab_categories")
   geography         String
   totalImpressions  BigInt   @map("total_impressions")
-  // Empty on every row as of this ingestion — the column exists in the sheet but isn't
-  // populated. Kept nullable rather than dropped since it may start arriving later.
+  // Was empty on every row before the 2026-10-13 "Demographics-By-Inventory" re-ingestion —
+  // real and fully populated as of that file. Kept nullable since older/partial ingestions
+  // could still leave it unset.
   totalUniqueAudience BigInt? @map("total_unique_audience")
   eCpm              Float    @map("e_cpm")
   buyingCpm         Float    @map("buying_cpm")
   floorCpm          Float    @map("floor_cpm")
+  // Same raw fraction column from the sheet serves both metrics, context-dependent on adFormat
+  // — a Video row's value is VCR (e.g. 0.705 = 70.5% completion), a Display row's is CTR (e.g.
+  // 0.0025 = 0.25%). Never both at once for a given row, so one column, not two.
+  ctrVcr            Float?   @map("ctr_vcr")
+  // Parsed at ingestion from the sheet's single "Demographics" free-text column (e.g. "Male 59%,
+  // Female 41%; Age 18-24 22%, 25-34 29%, ...") into real queryable percentages — never
+  // estimated. The sheet's age bands stop at a single combined "55+", one band short of this
+  // app's own AGE_GROUPS enum (which splits 55-64/65+) — age55PlusPct is the real figure for
+  // everyone 55 and up, with no way to separate the two sub-bands further.
+  genderMalePct     Float?   @map("gender_male_pct")
+  genderFemalePct   Float?   @map("gender_female_pct")
+  age1824Pct        Float?   @map("age_18_24_pct")
+  age2534Pct        Float?   @map("age_25_34_pct")
+  age3544Pct        Float?   @map("age_35_44_pct")
+  age4554Pct        Float?   @map("age_45_54_pct")
+  age55PlusPct      Float?   @map("age_55_plus_pct")
 
   @@index([iabCategories], type: Gin)
   @@map("inventory_websites")

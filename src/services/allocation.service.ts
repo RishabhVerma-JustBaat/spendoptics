@@ -253,25 +253,28 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
         const lineAmount = budget * (sharePercent / 100);
         const perItemAmounts = splitWithinLine(selection.items, lineAmount, input.plannerSettings.diversification);
 
-        const recommendedInventory: RecommendedInventoryItem[] = selection.items.map((item, i) => ({
-            inventoryId: item.candidate.id,
-            rank: i + 1,
-            role: item.role,
-            reason: null,
-            name: item.candidate.name,
-            environment: PLATFORM_FOR_LINE[selection.line],
-            avails: item.candidate.avails,
-            uniqueAudience: item.candidate.uniqueAudience,
-            cpm: item.candidate.cpm,
-            vcr: item.candidate.vcr,
-        }));
-
-        const lineImpressions = selection.items.reduce((sum, item, i) => {
+        const recommendedInventory: RecommendedInventoryItem[] = selection.items.map((item, i) => {
             const amount = perItemAmounts[i];
             const uncapped = Math.round((amount / item.candidate.cpm) * 1000);
             // Never claim to deliver more than the real avails ceiling for that item.
-            return sum + Math.min(uncapped, item.candidate.avails);
-        }, 0);
+            const impressions = Math.min(uncapped, item.candidate.avails);
+            return {
+                inventoryId: item.candidate.id,
+                rank: i + 1,
+                role: item.role,
+                reason: null,
+                name: item.candidate.name,
+                environment: PLATFORM_FOR_LINE[selection.line],
+                avails: item.candidate.avails,
+                uniqueAudience: item.candidate.uniqueAudience,
+                cpm: item.candidate.cpm,
+                vcr: item.candidate.vcr,
+                amount: Math.round(amount),
+                impressions,
+            };
+        });
+
+        const lineImpressions = recommendedInventory.reduce((sum, item) => sum + item.impressions, 0);
 
         return {
             inventoryLine: selection.line,

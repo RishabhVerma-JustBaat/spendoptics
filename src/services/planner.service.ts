@@ -7,6 +7,7 @@ import { getIabCategories } from './inventory.service';
 import { PlanService } from './plan.service';
 import { PlanDocument, PlanSaveRequest } from '../types/plan.types';
 import { GeneratedPlan, PlannerInput } from '../types/planner.types';
+import { ApiError } from '../utils/apiError';
 
 export const SCHEMA_VERSION = 2; // 1 was the old, now-retired single-call /plan/analyse shape
 
@@ -77,6 +78,19 @@ export class PlannerService {
     async generate(input: PlannerInput): Promise<GeneratedPlan> {
         const candidates = await buildCandidateInventory(input);
         const core = buildPlanCore(candidates, input);
+
+        // Fail fast and explicitly rather than spend an LLM call narrating an empty plan —
+        // zero selected lines means not one requested platform had any real inventory matching
+        // the given filters (categories, CPM caps, viewability, etc. all tighten this), so
+        // there's nothing left to plan with at all.
+        if (core.budgetAllocation.length === 0) {
+            const reasons = core.plannedByTeam.map(p => `${p.platform} (${p.reason})`).join('; ');
+            throw new ApiError(
+                422,
+                `Not enough real inventory matched this input to generate a plan.${reasons ? ` ${reasons}` : ''} Try loosening the filters (platforms, IAB categories, CPM caps, or viewability/VCR minimums) and generate again.`
+            );
+        }
+
         // Both curves are synchronous/CPU-bound (no LLM, no extra DB round trip — see
         // curves.service.ts), so there's nothing to gain from Promise.all-ing them alongside
         // the narration call's actual network request.

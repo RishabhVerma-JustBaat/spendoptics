@@ -205,7 +205,11 @@ For EVERY field, decide one of three provenance tags:
 
 Never skip a field because nothing was said — tag it "assumed" and give your best reasonable default instead. Two fields are conditional exceptions: "inventory.iabCategories" (only suggest one of these real categories: ${iabCategories.join(', ')} — leave it unsuggested if genuinely nothing fits, since inventing one that doesn't exist in the real data defeats its purpose) and "brand.category" (leave it out if the brand name gives no real signal at all — an unfamiliar or ambiguous name shouldn't get a guessed category).
 
-A separate set of fields works the other way around — they may ONLY ever be tagged "stated", never "inferred" or "assumed": brand.name, buying.dspChoice (and its dependents spendoptixDspRoute/ownDspNames), audience.excludeStates, inventory.preferredSitesApps, inventory.blockedSitesApps. If the brief doesn't literally name one of these, leave the field out entirely — a guessed brand name, DSP preference, excluded state, or preferred/blocked property is worse than an honestly blank field here.
+A separate set of fields works the other way around — they may ONLY ever be tagged "stated", never "inferred" or "assumed": brand.name, buying.dspChoice (and its dependents spendoptixDspRoute/ownDspNames), audience.excludeStates, inventory.preferredSitesApps, inventory.blockedSitesApps. If the brief doesn't literally name one of these, leave the field out entirely — a guessed brand name, DSP preference, excluded state, or preferred/blocked property is worse than an honestly blank field here. These five fields (plus the two conditional ones above) are the ONLY fields ever allowed to be left out — every other field below, including ones with no obvious signal (e.g. campaign.startDate, campaign.pacing, audience.geoScope), must still get a real "assumed" value per the main rule; never apply this "leave it out" treatment to a field that isn't explicitly named in this paragraph or the one above it.
+
+"brand.name" specifically means the ADVERTISER running this campaign — never a publisher, app, channel, or property the brief is asking *about*. A brief that asks "do you have inventory on X and Y" or "what are your rates for X" is asking about X and Y as properties, not naming an advertiser at all — in that case leave brand.name out entirely and put X and Y into inventory.preferredSitesApps instead (tagged "stated"), since that's what the brief is actually naming. Only use brand.name when the brief identifies whose campaign this is, distinct from any property/publisher it also mentions.
+
+A brief may list several platforms/devices tied to different named properties in one go (e.g. "Mobile for X, CTV for Y", or a bulleted device list) — capture every platform actually named into inventory.platforms, not just the first one, and tag each "stated" (not "inferred") since the brief named it directly.
 
 Two fields are the opposite again — they can never be left out no matter how thin the brief is: audience.gender and audience.ageGroups must always get a real value, "assumed" if nothing else justifies it. "campaign.budget" also can never be left out (unlike the general escape hatch below) — always give a real number, "assumed" if the brief implies nothing, since the planner needs a starting figure to react to and adjust rather than a blank field.
 
@@ -220,7 +224,7 @@ A brief may include a table of impression/avail targets broken down by region an
 Fields and their types/allowed values:
 ${FIELD_REFERENCE}
 
-Output each field as one "field::jsonValue::provenance" string in "suggestions" — field is the exact dot path above (e.g. "campaign.budget"), jsonValue is that value JSON-encoded exactly matching its type (a bare number, a quoted string, an array, or an object), provenance is exactly "stated", "inferred", or "assumed". Money is always INR. A field you have no reasonable basis for even as an assumption (e.g. buying.seatId, buying.ownDspNames when no DSP preference is evident) can be left out entirely — an honestly-missing field beats an invented one. Never output an empty string ("") as a value — if there's nothing to say, leave the whole field out instead.`;
+Output each field as one "field::jsonValue::provenance" string in "suggestions" — field is the exact dot path above (e.g. "campaign.budget"), jsonValue is that value JSON-encoded exactly matching its type (a bare number, a quoted string, an array, or an object), provenance is exactly "stated", "inferred", or "assumed". Money is always INR. Besides the specific fields already named above as allowed to be left out (and buying.spendoptixDspRoute/ownDspNames/seatId/frequencyCap, which only ever apply once a DSP preference is actually stated), every field must be output with a real value — never leave a field out just because it felt uncertain, and never output an empty string ("") in place of a real value or a leave-out.`;
 
 /** Parses "field::jsonValue::provenance" — provenance is a short fixed suffix, so splitting from the end avoids ambiguity with "::" that might appear inside a JSON array/object value. */
 const parseSuggestion = (
@@ -385,7 +389,7 @@ ${core.budgetAllocation
             line.recommendedInventory
                 .map(
                     item =>
-                        `    id=${item.inventoryId} name="${item.name}" role=${item.role} cpm=${item.cpm} avails=${item.avails}${item.vcr !== null ? ` vcr=${item.vcr}` : ''}`
+                        `    id=${item.inventoryId} name="${item.name}" role=${item.role} cpm=${item.cpm} avails=${item.avails} amount=₹${item.amount} impressions=${item.impressions}${item.vcr !== null ? ` vcr=${item.vcr}` : ''}`
                 )
                 .join('\n')
     )
