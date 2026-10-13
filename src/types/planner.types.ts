@@ -29,7 +29,7 @@ export type KpiMetric = (typeof KPI_METRICS)[number];
 export const PACINGS = ['even', 'front-loaded', 'back-loaded', 'burst'] as const;
 export type Pacing = (typeof PACINGS)[number];
 
-export const GEO_SCOPES = ['pan-india', 'states', 'cities'] as const;
+export const GEO_SCOPES = ['pan-india', 'states'] as const;
 export type GeoScope = (typeof GEO_SCOPES)[number];
 
 export const GENDERS = ['all', 'male', 'female'] as const;
@@ -37,12 +37,6 @@ export type Gender = (typeof GENDERS)[number];
 
 export const AGE_GROUPS = ['18-24', '25-34', '35-44', '45-54', '55-64', '65+'] as const;
 export type AgeGroup = (typeof AGE_GROUPS)[number];
-
-export const AFFLUENCE_SECS = ['A', 'B', 'C', 'D', 'E'] as const;
-export type AffluenceSec = (typeof AFFLUENCE_SECS)[number];
-
-export const INCOME_BANDS = ['premium', 'upper-mid', 'mid', 'mass'] as const;
-export type IncomeBand = (typeof INCOME_BANDS)[number];
 
 /**
  * The 9 platform values the form accepts — PLATFORM_LINE_MAP in planner.candidates.ts maps
@@ -73,7 +67,6 @@ export const QUALITY_TIERS = ['premium-only', 'premium-preferred', 'any'] as con
 export type QualityTier = (typeof QUALITY_TIERS)[number];
 
 export const VIDEO_PLACEMENTS = ['instream', 'outstream', 'interstitial'] as const;
-export const VIDEO_POSITIONS = ['preroll', 'midroll', 'postroll'] as const;
 export const VIDEO_DURATIONS = ['under-10s', 'under-30s', 'up-to-60s'] as const;
 export const SKIPPABILITY = ['skippable', 'non-skippable'] as const;
 
@@ -116,17 +109,16 @@ export const ROLES = [
     'quality-anchor',
     'cost-efficient',
     'audience-fit',
-    'must-include',
     'preferred',
 ] as const;
 export type Role = (typeof ROLES)[number];
 
 export interface PlannerInput {
+    /** The original free-text brief this input was built from (via suggest), carried through untouched into generate — null for an input built entirely by hand with no suggest call involved. */
+    rawPrompt: string | null;
     brand: {
         name: string | null;
-        url: string | null;
         category: string | null;
-        competitors: string[];
     };
     campaign: {
         objective: Objective | null;
@@ -143,29 +135,17 @@ export interface PlannerInput {
     audience: {
         geoScope: GeoScope | null;
         states: string[];
-        cities: string[];
         excludeStates: string[];
         gender: Gender | null;
         ageGroups: AgeGroup[];
-        affluenceSec: AffluenceSec[];
-        incomeBand: IncomeBand | null;
-        interests: string[];
-        behaviours: string[];
-        lifeStage: string[];
-        languages: string[];
-        audienceNotes: string | null;
     };
     inventory: {
         platforms: Platform[];
         mediaTypes: MediaType[];
         iabCategories: string[];
-        contentGenres: string[];
         qualityTier: QualityTier | null;
         preferredSitesApps: string[];
         blockedSitesApps: string[];
-        mustInclude: string[];
-        categoriesToAvoid: string[];
-        brandSafetyExclusions: string[];
         minViewabilityPct: number | null;
         minVcrPct: number | null;
         maxCpm: number | null;
@@ -178,7 +158,6 @@ export interface PlannerInput {
         displayFormats: string[];
         displaySizes: string[];
         videoPlacements: (typeof VIDEO_PLACEMENTS)[number][];
-        videoPositions: (typeof VIDEO_POSITIONS)[number][];
         videoDurations: (typeof VIDEO_DURATIONS)[number][];
         skippability: (typeof SKIPPABILITY)[number][];
     };
@@ -207,7 +186,8 @@ export interface CandidateInventoryItem {
     uniqueAudience: number | null;
     cpm: number;
     vcr: number | null;
-    isMustInclude: boolean;
+    /** Real IAB categories for this item, null where the source sheet has no category column at all (CTV/Mobile OTT/In-App today) — never guessed. */
+    iabCategories: string[] | null;
     isPreferred: boolean;
 }
 
@@ -287,15 +267,7 @@ export interface GeneratedPlanCore {
     };
 }
 
-export const TARGET_GROUP_TYPES = [
-    'gender',
-    'age',
-    'affluence',
-    'interest',
-    'behaviour',
-    'life-stage',
-    'language',
-] as const;
+export const TARGET_GROUP_TYPES = ['gender', 'age'] as const;
 export type TargetGroupType = (typeof TARGET_GROUP_TYPES)[number];
 
 export interface RecommendedWindow {

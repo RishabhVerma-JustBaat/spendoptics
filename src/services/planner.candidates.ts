@@ -44,7 +44,7 @@ const caseInsensitiveMatch = (value: string, list: string[]): boolean => {
  * three lines have literally nothing stopping an obviously mismatched or brand-unsafe app
  * (e.g. a dating app) from scoring well on volume/cost alone and getting recommended.
  */
-const DEFAULT_UNSAFE_KEYWORDS = [
+export const DEFAULT_UNSAFE_KEYWORDS = [
     'dating',
     'gay',
     'lesbian',
@@ -57,10 +57,7 @@ const DEFAULT_UNSAFE_KEYWORDS = [
     'escort',
 ];
 
-const failsBrandSafety = (name: string, input: PlannerInput): boolean =>
-    caseInsensitiveMatch(name, DEFAULT_UNSAFE_KEYWORDS) ||
-    caseInsensitiveMatch(name, input.inventory.categoriesToAvoid) ||
-    caseInsensitiveMatch(name, input.inventory.brandSafetyExclusions);
+const failsBrandSafety = (name: string): boolean => caseInsensitiveMatch(name, DEFAULT_UNSAFE_KEYWORDS);
 
 /**
  * Primarily data-driven (what targeting the inputs actually specify), not an LLM judgment call —
@@ -70,13 +67,8 @@ const failsBrandSafety = (name: string, input: PlannerInput): boolean =>
 export const computeRateTier = (input: PlannerInput): RateTier => {
     const hasAudienceTargeting =
         input.audience.ageGroups.length > 0 ||
-        (input.audience.gender !== null && input.audience.gender !== 'all') ||
-        input.audience.affluenceSec.length > 0 ||
-        input.audience.interests.length > 0 ||
-        input.audience.behaviours.length > 0 ||
-        input.audience.lifeStage.length > 0;
-    const hasContentTargeting =
-        input.inventory.iabCategories.length > 0 || input.inventory.contentGenres.length > 0;
+        (input.audience.gender !== null && input.audience.gender !== 'all');
+    const hasContentTargeting = input.inventory.iabCategories.length > 0;
 
     let tier: RateTier = 'open';
     if (hasAudienceTargeting && hasContentTargeting) tier = 'advance';
@@ -91,8 +83,6 @@ export const computeRateTier = (input: PlannerInput): RateTier => {
 
 const isBlocked = (name: string, input: PlannerInput): boolean =>
     caseInsensitiveMatch(name, input.inventory.blockedSitesApps);
-const isMustInclude = (name: string, input: PlannerInput): boolean =>
-    caseInsensitiveMatch(name, input.inventory.mustInclude);
 const isPreferred = (name: string, input: PlannerInput): boolean =>
     caseInsensitiveMatch(name, input.inventory.preferredSitesApps);
 
@@ -120,7 +110,7 @@ const fetchCtvCandidates = async (input: PlannerInput, tier: RateTier): Promise<
     const cpmColumn = tier === 'open' ? 'cpmOpen' : tier === 'premium' ? 'cpmPremiumAudience' : 'cpmAdvanced';
     return rows
         .filter(r => !isBlocked(r.applicationName, input) && !isBlocked(r.appUrl, input))
-        .filter(r => !failsBrandSafety(r.applicationName, input) && !failsBrandSafety(r.appUrl, input))
+        .filter(r => !failsBrandSafety(r.applicationName) && !failsBrandSafety(r.appUrl))
         .map(r => ({
             id: r.appUrl,
             name: r.applicationName,
@@ -133,7 +123,7 @@ const fetchCtvCandidates = async (input: PlannerInput, tier: RateTier): Promise<
             uniqueAudience: Number(r.totalUniques),
             cpm: r[cpmColumn],
             vcr: r.vcr,
-            isMustInclude: isMustInclude(r.applicationName, input) || isMustInclude(r.appUrl, input),
+            iabCategories: null, // no category column in this sheet
             isPreferred: isPreferred(r.applicationName, input) || isPreferred(r.appUrl, input),
         }))
         .filter(c => input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
@@ -149,7 +139,7 @@ const fetchMobileOttCandidates = async (
     const cpmColumn = tier === 'open' ? 'cpmOpen' : tier === 'premium' ? 'cpmPremiumAudience' : 'cpmAdvanced';
     return rows
         .filter(r => !isBlocked(r.appName, input) && !isBlocked(r.packageId, input))
-        .filter(r => !failsBrandSafety(r.appName, input) && !failsBrandSafety(r.packageId, input))
+        .filter(r => !failsBrandSafety(r.appName) && !failsBrandSafety(r.packageId))
         .map(r => ({
             id: r.packageId,
             name: r.appName,
@@ -160,7 +150,7 @@ const fetchMobileOttCandidates = async (
             uniqueAudience: null,
             cpm: r[cpmColumn],
             vcr: r.vcr,
-            isMustInclude: isMustInclude(r.appName, input) || isMustInclude(r.packageId, input),
+            iabCategories: null, // no category column in this sheet
             isPreferred: isPreferred(r.appName, input) || isPreferred(r.packageId, input),
         }))
         .filter(c => input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
@@ -179,17 +169,7 @@ const fetchWebsiteCandidates = async (input: PlannerInput): Promise<CandidateInv
     const rows = await prisma.inventoryWebsite.findMany({ where });
     return rows
         .filter(r => !isBlocked(r.inventoryName, input))
-        .filter(r => !failsBrandSafety(r.inventoryName, input))
-        // Real category data exists here (unlike CTV/Mobile OTT/In-App), so exclusion can also
-        // match on the row's actual categories, not just its name.
-        .filter(
-            r =>
-                !r.iabCategories.some(
-                    cat =>
-                        caseInsensitiveMatch(cat, input.inventory.categoriesToAvoid) ||
-                        caseInsensitiveMatch(cat, input.inventory.brandSafetyExclusions)
-                )
-        )
+        .filter(r => !failsBrandSafety(r.inventoryName))
         .map(r => ({
             id: r.inventoryName,
             name: r.inventoryName,
@@ -199,7 +179,7 @@ const fetchWebsiteCandidates = async (input: PlannerInput): Promise<CandidateInv
             uniqueAudience: r.totalUniqueAudience === null ? null : Number(r.totalUniqueAudience),
             cpm: r.buyingCpm,
             vcr: null, // not present in this sheet
-            isMustInclude: isMustInclude(r.inventoryName, input),
+            iabCategories: r.iabCategories,
             isPreferred: isPreferred(r.inventoryName, input),
         }))
         .filter(c => input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
@@ -219,7 +199,7 @@ const fetchInAppCandidates = async (input: PlannerInput): Promise<CandidateInven
         // (scripts/ingest-inventory.js), not something to compensate for with a guessed floor.
         .filter(r => r.eCpm > 0)
         .filter(r => !isBlocked(r.appName, input) && !isBlocked(r.inventoryUrl, input))
-        .filter(r => !failsBrandSafety(r.appName, input) && !failsBrandSafety(r.inventoryUrl, input))
+        .filter(r => !failsBrandSafety(r.appName) && !failsBrandSafety(r.inventoryUrl))
         .map(r => ({
             id: r.inventoryUrl,
             name: r.appName,
@@ -229,7 +209,7 @@ const fetchInAppCandidates = async (input: PlannerInput): Promise<CandidateInven
             uniqueAudience: null, // not present in this sheet
             cpm: r.eCpm,
             vcr: null, // not present in this sheet
-            isMustInclude: isMustInclude(r.appName, input) || isMustInclude(r.inventoryUrl, input),
+            iabCategories: null, // no category column in this sheet
             isPreferred: isPreferred(r.appName, input) || isPreferred(r.inventoryUrl, input),
         }))
         .filter(c => input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)

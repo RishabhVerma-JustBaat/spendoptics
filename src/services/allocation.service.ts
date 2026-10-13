@@ -23,49 +23,60 @@ import {
     RecommendedInventoryItem,
     Role,
 } from '../types/planner.types';
-import { CandidateResult, computeRateTier, PLATFORM_LINE_MAP } from './planner.candidates';
+import { CandidateResult, computeRateTier, DEFAULT_UNSAFE_KEYWORDS, PLATFORM_LINE_MAP } from './planner.candidates';
 
 /** Normalizes a value into [0, 1] against the max in its set — 0 if every value in the set is 0. */
 const normalize = (value: number, max: number): number => (max > 0 ? value / max : 0);
 
 /**
- * How attractive one candidate is, before must-include/preferred adjustments. The weighting
- * depends on plannerSettings.optimiseFor — "viewability" falls back to the same formula as
- * "quality" since no ingested sheet has a viewability column to optimise against at all.
+ * How attractive one candidate is, before preferred adjustments. Split into two trust tiers:
+ * "high trust" signals are directly comparable across every candidate regardless of which sheet
+ * it came from (volume, price, and a real IAB-category match against what was actually asked
+ * for) and dominate the score; "low trust" signals (VCR, unique audience) are real but only
+ * exist for some lines, don't speak to volume or price at all, and only ever nudge the ranking
+ * rather than compete with it. The weighting beyond that depends on plannerSettings.optimiseFor
+ * — "viewability" falls back to the same formula as "quality" since no ingested sheet has a
+ * viewability column to optimise against at all. An explicit "quality"/"viewability" ask is the
+ * one case that inverts the trust weighting on purpose — a stated preference overrides the
+ * default, same precedent as "stated" beating "assumed" in the suggest call.
  */
 const scoreCandidate = (
     candidate: CandidateInventoryItem,
     maxAvails: number,
     maxCpm: number,
-    optimiseFor: PlannerInput['plannerSettings']['optimiseFor']
+    optimiseFor: PlannerInput['plannerSettings']['optimiseFor'],
+    requestedIabCategories: string[]
 ): number => {
     const reachScore = normalize(candidate.avails, maxAvails);
     const costEfficiencyScore = 1 - normalize(candidate.cpm, maxCpm); // cheaper = higher score
-    const qualityScore =
-        (candidate.vcr !== null ? candidate.vcr : 0.5) * 0.5 +
+    const iabMatchScore =
+        requestedIabCategories.length === 0 || candidate.iabCategories === null
+            ? 0.5 // nothing asked, or this line has no real category data — neutral, not a penalty
+            : candidate.iabCategories.some(c => requestedIabCategories.includes(c))
+              ? 1
+              : 0;
+
+    // vcr is a 0-100 percentage (see projectKpiFit's comment), not 0-1 — divide before blending
+    // it into a 0-1 score.
+    const lowTrustScore =
+        (candidate.vcr !== null ? candidate.vcr / 100 : 0.5) * 0.5 +
         (candidate.uniqueAudience !== null ? 0.5 : 0.25);
 
     switch (optimiseFor) {
         case 'reach':
-            return reachScore;
+            return reachScore * 0.7 + iabMatchScore * 0.3;
         case 'cost-efficiency':
-            return costEfficiencyScore;
+            return costEfficiencyScore * 0.7 + iabMatchScore * 0.3;
         case 'quality':
         case 'viewability':
-            return qualityScore;
+            return lowTrustScore * 0.7 + iabMatchScore * 0.3;
         case 'balanced':
         default:
-            return reachScore * 0.4 + costEfficiencyScore * 0.4 + qualityScore * 0.2;
+            return reachScore * 0.3 + costEfficiencyScore * 0.3 + iabMatchScore * 0.25 + lowTrustScore * 0.15;
     }
 };
 
-const assignRole = (
-    candidate: CandidateInventoryItem,
-    selected: CandidateInventoryItem[],
-    maxAvails: number,
-    minCpm: number
-): Role => {
-    if (candidate.isMustInclude) return 'must-include';
+const assignRole = (candidate: CandidateInventoryItem, maxAvails: number, minCpm: number): Role => {
     if (candidate.isPreferred) return 'preferred';
     if (candidate.avails === maxAvails) return 'reach-driver';
     if (candidate.cpm === minCpm) return 'cost-efficient';
@@ -97,28 +108,29 @@ const selectForLine = (
     const maxCpm = Math.max(...candidates.map(c => c.cpm));
     const minCpm = Math.min(...candidates.map(c => c.cpm));
 
-    const scored = candidates.map(c => ({
-        candidate: c,
-        // Preferred gets a flat boost rather than its own weighting term — nice-to-have, not a
-        // hard requirement, so it nudges ranking without dominating the formula.
-        score:
-            scoreCandidate(c, maxAvails, maxCpm, input.plannerSettings.optimiseFor) *
-            (c.isPreferred ? 1.2 : 1),
-    }));
-
-    const mustIncludes = scored.filter(s => s.candidate.isMustInclude);
-    const rest = scored
-        .filter(s => !s.candidate.isMustInclude)
+    const scored = candidates
+        .map(c => ({
+            candidate: c,
+            // Preferred gets a flat boost rather than its own weighting term — nice-to-have, not a
+            // hard requirement, so it nudges ranking without dominating the formula.
+            score:
+                scoreCandidate(
+                    c,
+                    maxAvails,
+                    maxCpm,
+                    input.plannerSettings.optimiseFor,
+                    input.inventory.iabCategories
+                ) * (c.isPreferred ? 1.2 : 1),
+        }))
         .sort((a, b) => b.score - a.score);
 
     const cap = effectiveMaxForLine(input);
-    const slotsLeftAfterMustIncludes = Math.max(cap - mustIncludes.length, 0);
-    const picked = [...mustIncludes, ...rest.slice(0, slotsLeftAfterMustIncludes)];
+    const picked = scored.slice(0, cap);
 
     const items = picked.map(p => ({
         candidate: p.candidate,
         score: p.score,
-        role: assignRole(p.candidate, picked.map(x => x.candidate), maxAvails, minCpm),
+        role: assignRole(p.candidate, maxAvails, minCpm),
     }));
 
     // Line-level attractiveness for the cross-line budget split below — sum rather than average,
@@ -334,11 +346,11 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
             dspCompatible: input.buying.dspChoice !== null,
             rateCard: tier,
         },
+        // User-configurable exclusion lists (categoriesToAvoid/brandSafetyExclusions) were
+        // removed from the input form — only the hardcoded keyword floor (planner.candidates.ts)
+        // still applies, to every plan, unconditionally.
         brandSafety: {
-            exclusionsApplied: [
-                ...input.inventory.categoriesToAvoid,
-                ...input.inventory.brandSafetyExclusions,
-            ],
+            exclusionsApplied: [...DEFAULT_UNSAFE_KEYWORDS],
         },
     };
 };

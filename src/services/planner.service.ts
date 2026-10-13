@@ -21,11 +21,9 @@ const toPlanSaveRequest = (planId: string, input: PlannerInput, plan: GeneratedP
     planId,
     source: { app: 'ai-planner', trigger: 'generate' },
     brief: {
-        // This flow has no single free-text field by the time a plan is generated (Call 1's
-        // prompt, if any, only ever fed suggestions — see planner.prompts.ts) — the vetted
-        // input *is* the brief, kept here in full so a reopened plan can show exactly what was
-        // asked for.
-        text: '',
+        // The original free-text brief, carried through from Call 1 via input.rawPrompt — null
+        // for a plan built entirely by hand with no suggest call involved.
+        text: input.rawPrompt ?? '',
         parsed: input as unknown as Record<string, unknown>,
         answers: {},
     },
@@ -39,7 +37,6 @@ const toPlanSaveRequest = (planId: string, input: PlannerInput, plan: GeneratedP
     market: {
         geoScope: input.audience.geoScope,
         states: input.audience.states,
-        cities: input.audience.cities,
         excludeStates: input.audience.excludeStates,
     },
     audience: {

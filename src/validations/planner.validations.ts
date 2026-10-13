@@ -1,6 +1,5 @@
 import Joi from 'joi';
 import {
-    AFFLUENCE_SECS,
     AGE_GROUPS,
     DEAL_TYPES,
     DIVERSIFICATIONS,
@@ -8,7 +7,6 @@ import {
     FREQUENCY_CAP_PERIODS,
     GENDERS,
     GEO_SCOPES,
-    INCOME_BANDS,
     KPI_METRICS,
     MEDIA_TYPES,
     OBJECTIVES,
@@ -20,7 +18,6 @@ import {
     SPENDOPTIX_DSP_ROUTES,
     VIDEO_DURATIONS,
     VIDEO_PLACEMENTS,
-    VIDEO_POSITIONS,
 } from '../types/planner.types';
 
 // Every field is optional per the product spec ("Every input field is optional. Anything
@@ -45,16 +42,16 @@ export const savePlanSchema = Joi.object({
 });
 
 // Every nullable field also carries .empty('') — caught live: the suggest call (Call 1) can
-// return an empty string for a field it had no real value for (e.g. brand.url) rather than a
+// return an empty string for a field it had no real value for (e.g. campaign.seasonality) rather than a
 // clean null, and .allow(null) alone doesn't accept '' as a value. .empty('') treats '' as
 // "absent", which then falls through to each field's own .default(null) instead of failing
 // validation outright.
 export const generatePlanSchema = Joi.object({
+    rawPrompt: Joi.string().allow(null).empty('').default(null),
+
     brand: Joi.object({
         name: Joi.string().allow(null).empty('').default(null),
-        url: Joi.string().allow(null).empty('').default(null),
         category: Joi.string().allow(null).empty('').default(null),
-        competitors: stringArray,
     }).default(),
 
     campaign: Joi.object({
@@ -97,7 +94,6 @@ export const generatePlanSchema = Joi.object({
             .allow(null).empty('')
             .default(null),
         states: stringArray,
-        cities: stringArray,
         excludeStates: stringArray,
         gender: Joi.string()
             .valid(...GENDERS)
@@ -106,18 +102,6 @@ export const generatePlanSchema = Joi.object({
         ageGroups: Joi.array()
             .items(Joi.string().valid(...AGE_GROUPS))
             .default([]),
-        affluenceSec: Joi.array()
-            .items(Joi.string().valid(...AFFLUENCE_SECS))
-            .default([]),
-        incomeBand: Joi.string()
-            .valid(...INCOME_BANDS)
-            .allow(null).empty('')
-            .default(null),
-        interests: stringArray,
-        behaviours: stringArray,
-        lifeStage: stringArray,
-        languages: stringArray,
-        audienceNotes: Joi.string().allow(null).empty('').default(null),
     }).default(),
 
     inventory: Joi.object({
@@ -128,16 +112,12 @@ export const generatePlanSchema = Joi.object({
             .items(Joi.string().valid(...MEDIA_TYPES))
             .default([]),
         iabCategories: stringArray,
-        contentGenres: stringArray,
         qualityTier: Joi.string()
             .valid(...QUALITY_TIERS)
             .allow(null).empty('')
             .default(null),
         preferredSitesApps: stringArray,
         blockedSitesApps: stringArray,
-        mustInclude: stringArray,
-        categoriesToAvoid: stringArray,
-        brandSafetyExclusions: stringArray,
         minViewabilityPct: Joi.number().min(0).max(100).allow(null).empty('').default(null),
         minVcrPct: Joi.number().min(0).max(100).allow(null).empty('').default(null),
         maxCpm: Joi.number().min(0).allow(null).empty('').default(null),
@@ -160,9 +140,6 @@ export const generatePlanSchema = Joi.object({
         displaySizes: stringArray,
         videoPlacements: Joi.array()
             .items(Joi.string().valid(...VIDEO_PLACEMENTS))
-            .default([]),
-        videoPositions: Joi.array()
-            .items(Joi.string().valid(...VIDEO_POSITIONS))
             .default([]),
         videoDurations: Joi.array()
             .items(Joi.string().valid(...VIDEO_DURATIONS))

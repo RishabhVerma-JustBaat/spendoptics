@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { generateStructured } from '../services/bedrock.service';
 import {
-    AFFLUENCE_SECS,
     AGE_GROUPS,
     CurveCommentary,
     DEAL_TYPES,
@@ -12,7 +11,6 @@ import {
     GEO_SCOPES,
     GeneratedPlan,
     GeneratedPlanCore,
-    INCOME_BANDS,
     KPI_METRICS,
     MEDIA_TYPES,
     OBJECTIVES,
@@ -27,7 +25,6 @@ import {
     TARGET_GROUP_TYPES,
     VIDEO_DURATIONS,
     VIDEO_PLACEMENTS,
-    VIDEO_POSITIONS,
 } from '../types/planner.types';
 import { BudgetCurveResult, CpmCurveResult } from '../services/curves.service';
 
@@ -46,7 +43,8 @@ export type Provenance = 'stated' | 'inferred' | 'assumed';
 
 /** A blank form — every field null/empty/the product-level default, nothing suggested yet. generateSuggestions below fills fields in on top of this one at a time, so any field the model didn't address at all is left in this safe, honest "unset" state rather than missing from the object. */
 export const buildEmptyPlannerInput = (): PlannerInput => ({
-    brand: { name: null, url: null, category: null, competitors: [] },
+    rawPrompt: null,
+    brand: { name: null, category: null },
     campaign: {
         objective: null,
         kpis: [],
@@ -61,29 +59,17 @@ export const buildEmptyPlannerInput = (): PlannerInput => ({
     audience: {
         geoScope: null,
         states: [],
-        cities: [],
         excludeStates: [],
         gender: null,
         ageGroups: [],
-        affluenceSec: [],
-        incomeBand: null,
-        interests: [],
-        behaviours: [],
-        lifeStage: [],
-        languages: [],
-        audienceNotes: null,
     },
     inventory: {
         platforms: [],
         mediaTypes: [],
         iabCategories: [],
-        contentGenres: [],
         qualityTier: null,
         preferredSitesApps: [],
         blockedSitesApps: [],
-        mustInclude: [],
-        categoriesToAvoid: [],
-        brandSafetyExclusions: [],
         minViewabilityPct: null,
         minVcrPct: null,
         maxCpm: null,
@@ -95,7 +81,6 @@ export const buildEmptyPlannerInput = (): PlannerInput => ({
         displayFormats: [],
         displaySizes: [],
         videoPlacements: [],
-        videoPositions: [],
         videoDurations: [],
         skippability: [],
     },
@@ -117,9 +102,7 @@ export const buildEmptyPlannerInput = (): PlannerInput => ({
 /** Every leaf field the suggest call can fill, with how to validate a parsed value for it — mirrors the isValidAssumedValue pattern this codebase used before: reject an out-of-set value rather than write something the rest of the app never expects. "free" fields (brand name, notes, ids, ...) have no fixed vocabulary to check against. */
 const FIELD_VALIDATORS: Record<string, (value: unknown) => boolean> = {
     'brand.name': v => typeof v === 'string',
-    'brand.url': v => typeof v === 'string',
     'brand.category': v => typeof v === 'string',
-    'brand.competitors': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'campaign.objective': v => (OBJECTIVES as readonly string[]).includes(v as string),
     'campaign.kpis': v =>
         Array.isArray(v) &&
@@ -147,28 +130,15 @@ const FIELD_VALIDATORS: Record<string, (value: unknown) => boolean> = {
         ),
     'audience.geoScope': v => (GEO_SCOPES as readonly string[]).includes(v as string),
     'audience.states': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
-    'audience.cities': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'audience.excludeStates': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'audience.gender': v => (GENDERS as readonly string[]).includes(v as string),
     'audience.ageGroups': v => Array.isArray(v) && v.every(x => (AGE_GROUPS as readonly string[]).includes(x)),
-    'audience.affluenceSec': v =>
-        Array.isArray(v) && v.every(x => (AFFLUENCE_SECS as readonly string[]).includes(x)),
-    'audience.incomeBand': v => (INCOME_BANDS as readonly string[]).includes(v as string),
-    'audience.interests': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
-    'audience.behaviours': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
-    'audience.lifeStage': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
-    'audience.languages': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
-    'audience.audienceNotes': v => typeof v === 'string',
     'inventory.platforms': v => Array.isArray(v) && v.every(x => (PLATFORMS as readonly string[]).includes(x)),
     'inventory.mediaTypes': v => Array.isArray(v) && v.every(x => (MEDIA_TYPES as readonly string[]).includes(x)),
     'inventory.iabCategories': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
-    'inventory.contentGenres': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'inventory.qualityTier': v => (QUALITY_TIERS as readonly string[]).includes(v as string),
     'inventory.preferredSitesApps': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'inventory.blockedSitesApps': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
-    'inventory.mustInclude': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
-    'inventory.categoriesToAvoid': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
-    'inventory.brandSafetyExclusions': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'inventory.minViewabilityPct': v => typeof v === 'number',
     'inventory.minVcrPct': v => typeof v === 'number',
     'inventory.maxCpm': v => typeof v === 'number' && v >= 0,
@@ -188,8 +158,6 @@ const FIELD_VALIDATORS: Record<string, (value: unknown) => boolean> = {
     'creative.displaySizes': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'creative.videoPlacements': v =>
         Array.isArray(v) && v.every(x => (VIDEO_PLACEMENTS as readonly string[]).includes(x)),
-    'creative.videoPositions': v =>
-        Array.isArray(v) && v.every(x => (VIDEO_POSITIONS as readonly string[]).includes(x)),
     'creative.videoDurations': v =>
         Array.isArray(v) && v.every(x => (VIDEO_DURATIONS as readonly string[]).includes(x)),
     'creative.skippability': v => Array.isArray(v) && v.every(x => (SKIPPABILITY as readonly string[]).includes(x)),
@@ -219,12 +187,12 @@ const buildSuggestSchema = () =>
         suggestions: z.array(z.string()),
     });
 
-const FIELD_REFERENCE = `brand.name (text), brand.url (text, e.g. nykaa.com), brand.category (text — your own inference from the brand, not a fixed list), brand.competitors (text list)
-campaign.objective (one of: ${OBJECTIVES.join(', ')}), campaign.kpis (list of {"metric":"vcr"|"ctr","target":number|null} — ONLY these 2 metrics, nothing else), campaign.budget (number, INR, no shorthand — "50 Lakh" -> 5000000, "1 Crore" -> 10000000), campaign.startDate/campaign.endDate (YYYY-MM-DD), campaign.campaignMonth (YYYY-MM, only if exact dates aren't known), campaign.seasonality (text), campaign.pacing (one of: ${PACINGS.join(', ')}), campaign.regionalTargets (list of {"region":text,"impressions":number} — see the table-parsing rule below)
-audience.geoScope (one of: ${GEO_SCOPES.join(', ')}), audience.states/audience.cities/audience.excludeStates (text lists), audience.gender (one of: ${GENDERS.join(', ')}), audience.ageGroups (list from: ${AGE_GROUPS.join(', ')}), audience.affluenceSec (list from: ${AFFLUENCE_SECS.join(', ')}), audience.incomeBand (one of: ${INCOME_BANDS.join(', ')}), audience.interests/behaviours/lifeStage/languages (text lists), audience.audienceNotes (text)
-inventory.platforms (list from: ${PLATFORMS.join(', ')} — "ctv-oem"/"ctv-fast" both mean ad-supported FAST channels like Samsung TV Plus/TCL Channel; "ctv-ott" means on-demand CTV apps like JioHotstar/ZEE5/MX Player; plain "ctv" means both), inventory.mediaTypes (list from: ${MEDIA_TYPES.join(', ')}), inventory.iabCategories (text list), inventory.contentGenres (text list), inventory.qualityTier (one of: ${QUALITY_TIERS.join(', ')}), inventory.preferredSitesApps/blockedSitesApps/mustInclude/categoriesToAvoid/brandSafetyExclusions (text lists), inventory.minViewabilityPct/minVcrPct (0-100), inventory.maxCpm (INR, a single overall cap — only use this when one CPM applies to everything), inventory.minAvails/minUniqueAudience (numbers), inventory.channelCpmTargets (list of {"platform":one of the platform values above,"maxCpm":number} — use this instead of maxCpm whenever different platforms are asked about at different rates, e.g. "₹130 for OTT-CTV, ₹100 for FAST")
-creative.displayFormats/displaySizes (text lists), creative.videoPlacements (list from: ${VIDEO_PLACEMENTS.join(', ')}), creative.videoPositions (list from: ${VIDEO_POSITIONS.join(', ')}), creative.videoDurations (list from: ${VIDEO_DURATIONS.join(', ')}), creative.skippability (list from: ${SKIPPABILITY.join(', ')})
-buying.dspChoice (one of: ${DSP_CHOICES.join(', ')}), buying.spendoptixDspRoute (one of: ${SPENDOPTIX_DSP_ROUTES.join(', ')}, only if dspChoice is spendoptix-dsp), buying.ownDspNames (text list, only if dspChoice is own-dsp), buying.seatId (text), buying.dealType (one of: ${DEAL_TYPES.join(', ')}), buying.frequencyCap ({"impressions":number,"period":"${FREQUENCY_CAP_PERIODS.join('"|"')}"})
+const FIELD_REFERENCE = `brand.name (text — ONLY if literally stated, never inferred/assumed), brand.category (text — your own inference from the brand, not a fixed list; leave out if the brand gives no real signal)
+campaign.objective (one of: ${OBJECTIVES.join(', ')}), campaign.kpis (list of {"metric":"vcr"|"ctr","target":number|null} — ONLY these 2 metrics, nothing else), campaign.budget (number, INR, no shorthand — "50 Lakh" -> 5000000, "1 Crore" -> 10000000 — NEVER leave this out, always give a real number even if assumed), campaign.startDate/campaign.endDate (YYYY-MM-DD), campaign.campaignMonth (YYYY-MM, only if exact dates aren't known), campaign.seasonality (text), campaign.pacing (one of: ${PACINGS.join(', ')}), campaign.regionalTargets (list of {"region":text,"impressions":number} — see the table-parsing rule below)
+audience.geoScope (one of: ${GEO_SCOPES.join(', ')}), audience.states (text list, only used when geoScope is "states"), audience.excludeStates (text list — ONLY if literally stated, never inferred/assumed), audience.gender (one of: ${GENDERS.join(', ')} — NEVER leave this out), audience.ageGroups (list from: ${AGE_GROUPS.join(', ')} — NEVER leave this out)
+inventory.platforms (list from: ${PLATFORMS.join(', ')} — "ctv-oem"/"ctv-fast" both mean ad-supported FAST channels like Samsung TV Plus/TCL Channel; "ctv-ott" means on-demand CTV apps like JioHotstar/ZEE5/MX Player; plain "ctv" means both), inventory.mediaTypes (list from: ${MEDIA_TYPES.join(', ')}), inventory.iabCategories (text list, only real categories, see rule below), inventory.qualityTier (one of: ${QUALITY_TIERS.join(', ')}), inventory.preferredSitesApps/blockedSitesApps (text lists — ONLY if literally stated, never inferred/assumed), inventory.minViewabilityPct/minVcrPct (0-100), inventory.maxCpm (INR, a single overall cap — only use this when one CPM applies to everything), inventory.minAvails/minUniqueAudience (numbers), inventory.channelCpmTargets (list of {"platform":one of the platform values above,"maxCpm":number} — use this instead of maxCpm whenever different platforms are asked about at different rates, e.g. "₹130 for OTT-CTV, ₹100 for FAST")
+creative.displayFormats/displaySizes (text lists), creative.videoPlacements (list from: ${VIDEO_PLACEMENTS.join(', ')}), creative.videoDurations (list from: ${VIDEO_DURATIONS.join(', ')}), creative.skippability (list from: ${SKIPPABILITY.join(', ')})
+buying.dspChoice (one of: ${DSP_CHOICES.join(', ')} — ONLY if literally stated, never inferred/assumed), buying.spendoptixDspRoute (one of: ${SPENDOPTIX_DSP_ROUTES.join(', ')}, only if dspChoice is spendoptix-dsp), buying.ownDspNames (text list, only if dspChoice is own-dsp), buying.seatId (text), buying.dealType (one of: ${DEAL_TYPES.join(', ')}), buying.frequencyCap ({"impressions":number,"period":"${FREQUENCY_CAP_PERIODS.join('"|"')}"})
 plannerSettings.optimiseFor (one of: ${OPTIMISE_FOR.join(', ')}, default balanced), plannerSettings.diversification (one of: ${DIVERSIFICATIONS.join(', ')}, default balanced), plannerSettings.maxRecommendationsPerLine (number, default 8)`;
 
 const buildSuggestSystemPrompt = (iabCategories: string[]): string =>
@@ -235,7 +203,13 @@ For EVERY field, decide one of three provenance tags:
 - "inferred" — not stated, but you can reasonably work it out from context (e.g. a brand's product category from its name, a sensible objective from the tone of the ask).
 - "assumed" — nothing in the brief gives any signal at all; you picked a plausible default.
 
-Never skip a field because nothing was said — tag it "assumed" and give your best reasonable default instead. The one exception is "inventory.iabCategories" — only suggest one of these real categories: ${iabCategories.join(', ')} — or leave it unsuggested if genuinely nothing fits, since inventing one that doesn't exist in the real data defeats its purpose.
+Never skip a field because nothing was said — tag it "assumed" and give your best reasonable default instead. Two fields are conditional exceptions: "inventory.iabCategories" (only suggest one of these real categories: ${iabCategories.join(', ')} — leave it unsuggested if genuinely nothing fits, since inventing one that doesn't exist in the real data defeats its purpose) and "brand.category" (leave it out if the brand name gives no real signal at all — an unfamiliar or ambiguous name shouldn't get a guessed category).
+
+A separate set of fields works the other way around — they may ONLY ever be tagged "stated", never "inferred" or "assumed": brand.name, buying.dspChoice (and its dependents spendoptixDspRoute/ownDspNames), audience.excludeStates, inventory.preferredSitesApps, inventory.blockedSitesApps. If the brief doesn't literally name one of these, leave the field out entirely — a guessed brand name, DSP preference, excluded state, or preferred/blocked property is worse than an honestly blank field here.
+
+Two fields are the opposite again — they can never be left out no matter how thin the brief is: audience.gender and audience.ageGroups must always get a real value, "assumed" if nothing else justifies it. "campaign.budget" also can never be left out (unlike the general escape hatch below) — always give a real number, "assumed" if the brief implies nothing, since the planner needs a starting figure to react to and adjust rather than a blank field.
+
+Whenever a field is genuinely, explicitly stated in the brief, that stated value always wins — these special cases above only govern what happens when nothing was said.
 
 Today's date is ${new Date().toISOString().slice(0, 10)}. The brief may give a date or date range with no year (e.g. "Oct 10 to Nov 5") — resolve it to this year if that date hasn't passed yet, or next year if it has; never resolve a bare date to a year that's already in the past relative to today.
 
@@ -311,6 +285,9 @@ export const generateSuggestions = async (
     });
 
     const input = buildEmptyPlannerInput();
+    // The original brief, carried through verbatim — not something the model decides, so it's
+    // set directly here rather than going through a "field::value::provenance" suggestion.
+    input.rawPrompt = prompt;
     const provenance: Record<string, Provenance> = {};
 
     for (const entry of result.suggestions) {
@@ -377,7 +354,7 @@ const buildNarrationSystemPrompt = (): string =>
 
 Hard rules:
 1. "title" is a short campaign-plan name (brand + objective + flight, e.g. "Nyka Reach Campaign — Nov 2026"). "summary" is one sentence covering what this plan does and why.
-2. "targetGroup" describes the audience actually targeted, as "type::value" strings — type is exactly one of ${TARGET_GROUP_TYPES.join(', ')}, value is the plain-text detail (e.g. "gender::Female", "age::25-34", "interest::Beauty & Fashion"). Only include what the brief/inputs actually specified — don't invent a target you weren't given.
+2. "targetGroup" describes the audience actually targeted, as "type::value" strings — type is exactly one of ${TARGET_GROUP_TYPES.join(', ')}, value is the plain-text detail (e.g. "gender::Female", "age::25-34"). Only include what the brief/inputs actually specified — don't invent a target you weren't given.
 3. "lineReasons" is one "line::reason" string per budget line you're given, each reason a short sentence on why that line earned its share (e.g. "ctv-fast::Premium ad-supported channel inventory with the strongest VCR for an awareness objective.").
 4. "itemReasons" is one "line|inventoryId::reason" string per recommended item you're given, each reason specific to that item's role and numbers WITHIN that line only (e.g. a reach-driver's reason cites its avails, a cost-efficient item's reason cites its CPM) — never a reason blending two different lines together. The same inventoryId can appear under more than one line (the same real property can be both a CTV row and a Mobile OTT row) — treat each line|inventoryId pair as its own separate item needing its own separate reason, even when the id repeats. Use the exact line and inventoryId you were given, unchanged — never invent either.
 5. "assumptions" lists anything the deterministic engine had to default because the input didn't specify it (you're told what was left unset) — plain language, one per line.
