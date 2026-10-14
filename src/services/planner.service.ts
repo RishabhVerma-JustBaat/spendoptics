@@ -3,7 +3,7 @@ import { generateCurveCommentary, generateNarration, generateSuggestions, mergeP
 import { buildCandidateInventory } from './planner.candidates';
 import { buildPlanCore } from './allocation.service';
 import { buildBudgetCurve, buildCpmCurve } from './curves.service';
-import { getIabCategories } from './inventory.service';
+import { getIabCategories, getSupportedCountries } from './inventory.service';
 import { PlanService } from './plan.service';
 import { PlanDocument, PlanSaveRequest } from '../types/plan.types';
 import { GeneratedPlan, PlannerInput } from '../types/planner.types';
@@ -76,6 +76,28 @@ export class PlannerService {
      * around decisions already made.
      */
     async generate(input: PlannerInput): Promise<GeneratedPlan> {
+        // Every ingested sheet is India-only (inventory_mobile_ott.country is the one real,
+        // literal column confirming this) and nothing anywhere filters candidates by
+        // audience.country/states at all — so without this check, a request for a market this
+        // platform has zero real data for (e.g. "Virginia, USA") would silently get Indian
+        // inventory recommended back as if it were a valid answer. Reading the supported-market
+        // list from the real data (not hardcoding "India") means this check tracks whatever the
+        // ingested sheets actually cover if that ever changes. Only rejects when a country was
+        // actually given and doesn't match — never blocks a direct generate() call that left
+        // audience.country unset.
+        if (input.audience.country) {
+            const supportedCountries = await getSupportedCountries();
+            const isSupported = supportedCountries.some(
+                c => c.toLowerCase() === input.audience.country!.trim().toLowerCase()
+            );
+            if (!isSupported) {
+                throw new ApiError(
+                    422,
+                    `This platform only has real inventory for ${supportedCountries.join(', ')} — "${input.audience.country}" isn't a market there's data for.`
+                );
+            }
+        }
+
         const candidates = await buildCandidateInventory(input);
         const core = buildPlanCore(candidates, input);
 
@@ -95,7 +117,7 @@ export class PlannerService {
         // curves.service.ts), so there's nothing to gain from Promise.all-ing them alongside
         // the narration call's actual network request.
         const budgetCurve = buildBudgetCurve(candidates, input);
-        const cpmCurve = buildCpmCurve(candidates, input.inventory.maxCpm);
+        const cpmCurve = buildCpmCurve(candidates, input);
 
         const narration = await generateNarration(input, core);
         const curveCommentary = await generateCurveCommentary(budgetCurve, cpmCurve, narration.bestDates);

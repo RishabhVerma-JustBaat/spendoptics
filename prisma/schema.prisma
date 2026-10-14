@@ -147,9 +147,13 @@ model InventoryWebsite {
   eCpm              Float    @map("e_cpm")
   buyingCpm         Float    @map("buying_cpm")
   floorCpm          Float    @map("floor_cpm")
-  // Same raw fraction column from the sheet serves both metrics, context-dependent on adFormat
-  // — a Video row's value is VCR (e.g. 0.705 = 70.5% completion), a Display row's is CTR (e.g.
-  // 0.0025 = 0.25%). Never both at once for a given row, so one column, not two.
+  // Same column from the sheet serves both metrics, context-dependent on adFormat — a Video
+  // row's value is VCR, a Display row's is CTR. Never both at once for a given row, so one
+  // column, not two. Stored as a 0-100 percentage, parsed from the sheet's own "NN.NN%+" string
+  // (e.g. "65%+", "0.20%+") at ingestion. As of the 2026-10-14 "WalletSize-CTR-VTR-Updated"
+  // sheet, this is a flat value per ad format (every Display row is 0.20%, every Video row is
+  // 65%) rather than a real per-property measurement — trusted as given per product direction,
+  // but never phrase output text as if it's specific to one property, since it isn't.
   ctrVcr            Float?   @map("ctr_vcr")
   // Parsed at ingestion from the sheet's single "Demographics" free-text column (e.g. "Male 59%,
   // Female 41%; Age 18-24 22%, 25-34 29%, ...") into real queryable percentages — never
@@ -163,6 +167,19 @@ model InventoryWebsite {
   age3544Pct        Float?   @map("age_35_44_pct")
   age4554Pct        Float?   @map("age_45_54_pct")
   age55PlusPct      Float?   @map("age_55_plus_pct")
+  // Parsed from the sheet's single "Wallet size" free-text column (e.g. "T1 Premium
+  // (₹1,00,000+ household/month) 8%, T2 Upper-middle (₹60,000–₹99,999) 17%, ..."). The 5 tier
+  // labels/income ranges are a fixed taxonomy repeated identically on every row (verified live
+  // across all 30,585 rows) — only each tier's percentage actually varies, so that's all that's
+  // stored; T1=Premium ₹1,00,000+/month, T2=Upper-middle ₹60,000-99,999, T3=Middle
+  // ₹30,000-59,999, T4=Lower-middle ₹15,000-29,999, T5=Value under ₹15,000. Also only a handful
+  // of distinct profiles reused across the dataset (3 as of this sheet), not a true per-property
+  // measurement — same trust-as-given caveat as ctrVcr above.
+  walletT1Pct       Float?   @map("wallet_t1_pct")
+  walletT2Pct       Float?   @map("wallet_t2_pct")
+  walletT3Pct       Float?   @map("wallet_t3_pct")
+  walletT4Pct       Float?   @map("wallet_t4_pct")
+  walletT5Pct       Float?   @map("wallet_t5_pct")
 
   @@index([iabCategories], type: Gin)
   @@map("inventory_websites")

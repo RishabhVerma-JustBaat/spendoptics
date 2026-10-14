@@ -12,6 +12,8 @@ export interface EnvironmentConfig {
         secretAccessKey?: string;
         modelId: string;
     };
+    /** Flat markup on every rate-card CPM — the planner quotes clients cost × (1 + this/100), and the difference is our commission. */
+    plannerMarginPercent: number;
 }
 
 const getConfig = (): EnvironmentConfig => {
@@ -29,6 +31,7 @@ const getConfig = (): EnvironmentConfig => {
             secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
             modelId: process.env.BEDROCK_MODEL_ID || 'anthropic.claude-opus-5',
         },
+        plannerMarginPercent: Number(process.env.PLANNER_MARGIN_PERCENT ?? 10),
     };
 };
 

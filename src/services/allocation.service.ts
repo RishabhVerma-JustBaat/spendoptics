@@ -24,6 +24,7 @@ import {
     Role,
 } from '../types/planner.types';
 import { CandidateResult, computeRateTier, DEFAULT_UNSAFE_KEYWORDS, PLATFORM_LINE_MAP } from './planner.candidates';
+import { config } from '../config/environment';
 
 /** Normalizes a value into [0, 1] against the max in its set — 0 if every value in the set is 0. */
 const normalize = (value: number, max: number): number => (max > 0 ? value / max : 0);
@@ -91,9 +92,19 @@ const effectiveMaxForLine = (input: PlannerInput): number => {
     return cap;
 };
 
+interface Placement {
+    candidate: CandidateInventoryItem;
+    score: number;
+    role: Role;
+    /** Client-price rupees placed on this item so far. */
+    spent: number;
+}
+
 interface LineSelection {
     line: InventoryLine;
-    items: { candidate: CandidateInventoryItem; score: number; role: Role }[];
+    items: Placement[];
+    /** The rest of the line's candidates in rank order — pulled in as 'spillover' only once the picks fill up. */
+    reserves: { candidate: CandidateInventoryItem; score: number }[];
     lineScore: number;
 }
 
@@ -102,7 +113,7 @@ const selectForLine = (
     candidates: CandidateInventoryItem[],
     input: PlannerInput
 ): LineSelection => {
-    if (candidates.length === 0) return { line, items: [], lineScore: 0 };
+    if (candidates.length === 0) return { line, items: [], reserves: [], lineScore: 0 };
 
     const maxAvails = Math.max(...candidates.map(c => c.avails));
     const maxCpm = Math.max(...candidates.map(c => c.cpm));
@@ -111,8 +122,10 @@ const selectForLine = (
     const scored = candidates
         .map(c => ({
             candidate: c,
-            // Preferred gets a flat boost rather than its own weighting term — nice-to-have, not a
-            // hard requirement, so it nudges ranking without dominating the formula.
+            // The 1.2x boost still shapes ranking among preferred items themselves, but isn't
+            // what guarantees inclusion below — verified live that a boost alone wasn't enough
+            // for a specifically-named property (e.g. WSJ) to survive into the top N against
+            // real CPM/avails competition from unrelated inventory.
             score:
                 scoreCandidate(
                     c,
@@ -124,34 +137,97 @@ const selectForLine = (
         }))
         .sort((a, b) => b.score - a.score);
 
+    // A preferred item is a literal name match against inventory.preferredSitesApps — the brief
+    // asked about it by name, so it's guaranteed a slot regardless of how it scores against
+    // unrelated inventory, same as this line's old must-include guarantee worked before that
+    // field was removed. Everyone else still competes normally for whatever slots are left.
+    const preferred = scored.filter(s => s.candidate.isPreferred);
+    const rest = scored.filter(s => !s.candidate.isPreferred);
+
     const cap = effectiveMaxForLine(input);
-    const picked = scored.slice(0, cap);
+    const pickCount = Math.max(cap - preferred.length, 0);
+    const picked = [...preferred, ...rest.slice(0, pickCount)];
 
     const items = picked.map(p => ({
         candidate: p.candidate,
         score: p.score,
         role: assignRole(p.candidate, maxAvails, minCpm),
+        spent: 0,
     }));
 
     // Line-level attractiveness for the cross-line budget split below — sum rather than average,
     // so a line with more good real inventory earns a bigger share, not just a higher per-item one.
     const lineScore = items.reduce((sum, i) => sum + i.score, 0);
 
-    return { line, items, lineScore };
+    return { line, items, reserves: rest.slice(pickCount), lineScore };
 };
 
-/** "broad" splits a line's budget evenly across its picks; otherwise spend follows score, so the top pick gets more than the last. */
-const splitWithinLine = (
-    items: LineSelection['items'],
-    lineAmount: number,
-    diversification: PlannerInput['plannerSettings']['diversification']
-): number[] => {
-    if (items.length === 0) return [];
-    if (diversification === 'broad') return items.map(() => lineAmount / items.length);
+/**
+ * No plan can realistically buy all of a property's avails, so the more of it a plan has
+ * already bought, the smaller the share of each further rupee it gets — the rest flows to
+ * less-bought items. Past the last tier the property takes nothing more at all.
+ */
+export const FILL_TIERS = [
+    { upToFill: 0.2, weight: 1 },
+    { upToFill: 0.4, weight: 0.5 },
+    { upToFill: 0.6, weight: 0.25 },
+] as const;
+export const MAX_FILL = FILL_TIERS[FILL_TIERS.length - 1].upToFill;
 
-    const totalScore = items.reduce((sum, i) => sum + i.score, 0);
-    if (totalScore === 0) return items.map(() => lineAmount / items.length);
-    return items.map(i => (i.score / totalScore) * lineAmount);
+/** The most a plan can ever spend on one item: MAX_FILL of its avails at its (client) CPM. */
+export const maxSpendFor = (c: CandidateInventoryItem): number => (c.avails * MAX_FILL * c.cpm) / 1000;
+
+/** Below a rupee of room left, an item counts as full — keeps pourIntoLine from looping on dust. */
+const MIN_ROOM = 1;
+
+const fillWeight = (p: Placement): number => {
+    if (maxSpendFor(p.candidate) - p.spent < MIN_ROOM) return 0;
+    const fill = (p.spent * 1000) / p.candidate.cpm / p.candidate.avails;
+    return FILL_TIERS.find(t => fill < t.upToFill)?.weight ?? 0;
+};
+
+/** Money is poured in this many slices so fill tiers re-weight as items fill, rather than once up front. */
+const POUR_STEPS = 100;
+
+/**
+ * Pours money into one line's items, each slice split by base weight × fill-tier weight —
+ * "broad" gives every item the same base weight, otherwise it's the item's score, so the top
+ * pick still gets more than the last. Once no item is in its full-weight tier any more, the
+ * next-ranked reserve joins as 'spillover' at full weight and takes most of what follows —
+ * so a line widens past its normal pick count only when its picks are genuinely filling up.
+ * Returns whatever couldn't be placed because the whole line ran out.
+ */
+const pourIntoLine = (
+    selection: LineSelection,
+    money: number,
+    diversification: PlannerInput['plannerSettings']['diversification']
+): number => {
+    const slice = money / POUR_STEPS;
+    let remaining = money;
+    while (remaining >= MIN_ROOM) {
+        let weights = selection.items.map(fillWeight);
+        if (!weights.includes(1) && selection.reserves.length > 0) {
+            const next = selection.reserves.shift()!;
+            selection.items.push({ ...next, role: 'spillover', spent: 0 });
+            weights = selection.items.map(fillWeight);
+        }
+        // Score can legitimately be 0 (every signal normalized to 0) — floor it so a full-weight
+        // item still takes money rather than stalling the pour.
+        const effective = weights.map((w, i) =>
+            diversification === 'broad' ? w : w * Math.max(selection.items[i].score, 1e-6)
+        );
+        const total = effective.reduce((sum, w) => sum + w, 0);
+        if (total === 0) break;
+
+        const pour = Math.min(remaining, slice);
+        selection.items.forEach((p, i) => {
+            if (effective[i] === 0) return;
+            const take = Math.min((pour * effective[i]) / total, maxSpendFor(p.candidate) - p.spent);
+            p.spent += take;
+            remaining -= take;
+        });
+    }
+    return remaining < MIN_ROOM ? 0 : remaining;
 };
 
 const projectKpiFit = (
@@ -222,6 +298,42 @@ const computeCpmFit = (input: PlannerInput, budgetAllocation: BudgetAllocationLi
     return results;
 };
 
+/** Agreed planning rule: a campaign reaches 40% of the audience it's bought against, so audience = reach ÷ 0.4. */
+export const REACH_SHARE_OF_AUDIENCE = 0.4;
+
+/** Campaign-level frequency used when the brief gives no frequency cap. */
+const DEFAULT_CAMPAIGN_FREQUENCY = 4;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Average impressions per reached person over the whole flight — the divisor in
+ * reach = impressions ÷ frequency. A stated buying.frequencyCap wins, scaled from its period up
+ * to the full flight (a 2/day cap over a 30-day flight is 60 per person); without flight dates
+ * there's nothing to scale by, so the cap is taken as-is for the whole campaign, the
+ * conservative reading.
+ */
+export const campaignFrequency = (input: PlannerInput): number => {
+    const cap = input.buying.frequencyCap;
+    if (!cap || cap.impressions <= 0) return DEFAULT_CAMPAIGN_FREQUENCY;
+
+    const { startDate, endDate } = input.campaign;
+    const flightDays =
+        startDate && endDate
+            ? Math.max(1, Math.round((new Date(endDate).getTime() - new Date(startDate).getTime()) / DAY_MS) + 1)
+            : null;
+    if (cap.period === 'campaign' || flightDays === null) return cap.impressions;
+
+    const periodsInFlight = cap.period === 'day' ? flightDays : Math.ceil(flightDays / (cap.period === 'week' ? 7 : 30));
+    return cap.impressions * periodsInFlight;
+};
+
+/** reach = impressions ÷ frequency, audience = reach ÷ REACH_SHARE_OF_AUDIENCE — the one place this chain is computed, so items, lines, key figures and both curves can't drift apart. */
+export const reachAndAudience = (impressions: number, frequency: number): { reach: number; audience: number } => {
+    const reach = Math.round(impressions / frequency);
+    return { reach, audience: Math.round(reach / REACH_SHARE_OF_AUDIENCE) };
+};
+
 const PLATFORM_FOR_LINE: Record<InventoryLine, Platform> = {
     'ctv-fast': 'ctv-fast',
     'ctv-ott': 'ctv-ott',
@@ -238,26 +350,37 @@ const PLATFORM_FOR_LINE: Record<InventoryLine, Platform> = {
 export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput): GeneratedPlanCore => {
     const tier = computeRateTier(input);
     const budget = input.campaign.budget ?? 0;
+    const frequency = campaignFrequency(input);
 
     const selections = (Object.keys(candidates.byLine) as InventoryLine[])
         .map(line => selectForLine(line, candidates.byLine[line], input))
         .filter(s => s.items.length > 0);
 
-    const totalLineScore = selections.reduce((sum, s) => sum + s.lineScore, 0);
+    // Each line gets its score-weighted share first; whatever a line can't place (its whole pool
+    // filled up) is re-poured across the lines that still have room, by the same weights, until
+    // it's all placed or every line is full — what's left then is reported as unspent.
+    const lineShare = (open: LineSelection[], s: LineSelection): number => {
+        const total = open.reduce((sum, o) => sum + o.lineScore, 0);
+        return total > 0 ? s.lineScore / total : 1 / open.length;
+    };
+    const diversification = input.plannerSettings.diversification;
+    let open = selections;
+    let unplaced = budget;
+    while (unplaced >= MIN_ROOM && open.length > 0) {
+        const round = unplaced;
+        const leftovers = open.map(s => pourIntoLine(s, round * lineShare(open, s), diversification));
+        unplaced = leftovers.reduce((sum, l) => sum + l, 0);
+        open = open.filter((_, i) => leftovers[i] === 0);
+    }
+    const unspentBudget = Math.round(Math.max(unplaced, 0));
 
     const budgetAllocation: BudgetAllocationLine[] = selections.map(selection => {
-        const sharePercent =
-            totalLineScore > 0
-                ? Math.round((selection.lineScore / totalLineScore) * 100)
-                : Math.round(100 / selections.length);
-        const lineAmount = budget * (sharePercent / 100);
-        const perItemAmounts = splitWithinLine(selection.items, lineAmount, input.plannerSettings.diversification);
+        const lineAmount = selection.items.reduce((sum, p) => sum + p.spent, 0);
+        const sharePercent = budget > 0 ? Math.round((lineAmount / budget) * 100) : 0;
 
         const recommendedInventory: RecommendedInventoryItem[] = selection.items.map((item, i) => {
-            const amount = perItemAmounts[i];
-            const uncapped = Math.round((amount / item.candidate.cpm) * 1000);
-            // Never claim to deliver more than the real avails ceiling for that item.
-            const impressions = Math.min(uncapped, item.candidate.avails);
+            const amount = item.spent;
+            const impressions = Math.round((amount / item.candidate.cpm) * 1000);
             return {
                 inventoryId: item.candidate.id,
                 rank: i + 1,
@@ -271,16 +394,17 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
                 vcr: item.candidate.vcr,
                 amount: Math.round(amount),
                 impressions,
+                ...reachAndAudience(impressions, frequency),
             };
         });
-
-        const lineImpressions = recommendedInventory.reduce((sum, item) => sum + item.impressions, 0);
 
         return {
             inventoryLine: selection.line,
             sharePercent,
-            amount: Math.round(lineAmount),
-            impressions: lineImpressions,
+            amount: recommendedInventory.reduce((sum, item) => sum + item.amount, 0),
+            impressions: recommendedInventory.reduce((sum, item) => sum + item.impressions, 0),
+            reach: recommendedInventory.reduce((sum, item) => sum + item.reach, 0),
+            audience: recommendedInventory.reduce((sum, item) => sum + item.audience, 0),
             reason: null,
             recommendedInventory,
         };
@@ -293,21 +417,17 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
     const averageCpm =
         estimatedImpressions > 0 ? Math.round((totalCpmWeighted / estimatedImpressions) * 1000) : 0;
 
-    // "uniques" per row means distinct people who saw THAT property — the same person can (and
-    // routinely does) show up in more than one property's own unique count (someone who watches
-    // both JioHotstar and Zee5 is counted once in each). Summing across properties therefore
-    // overcounts true reach by an unknown amount, and we have no cross-property overlap data to
-    // correct for it. The only number we can actually stand behind without inventing a dedup
-    // coefficient is the single largest property's own uniques — real reach is somewhere
-    // between that floor and the (overcounted) sum, and max is the end of that range we can
-    // defend as "at least this many distinct people." No cap applied on top of that — trusting
-    // the sheet's own figures as given, even where a single row looks large.
-    const knownUniqueCeiling = Math.max(
-        0,
-        ...allSelectedCandidates.map(c => c.uniqueAudience ?? 0)
-    );
-    const estimatedReach =
-        knownUniqueCeiling > 0 ? Math.min(estimatedImpressions, knownUniqueCeiling) : estimatedImpressions;
+    // Every candidate cpm already carries the flat margin (planner.candidates.ts's clientCpm), so
+    // what the client pays splits back into media cost and our commission by that same factor.
+    const clientSpend = budgetAllocation.reduce((sum, l) => sum + l.amount, 0);
+    const mediaCost = Math.round(clientSpend / (1 + config.plannerMarginPercent / 100));
+
+    // Reach and audience come from the agreed impressions → reach → audience chain (see
+    // reachAndAudience), summed from the per-item figures so the totals reconcile exactly with
+    // budgetAllocation. The sheets' own per-property uniques aren't used here: they overlap
+    // across properties with no dedup data, and their max alone ran past India's population.
+    const estimatedReach = budgetAllocation.reduce((sum, l) => sum + l.reach, 0);
+    const estimatedAudience = budgetAllocation.reduce((sum, l) => sum + l.audience, 0);
 
     const kpiFit: KpiFitResult[] = input.campaign.kpis.map(k =>
         projectKpiFit(k.metric, k.target, allSelectedCandidates)
@@ -326,12 +446,11 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
     return {
         keyFigures: {
             estimatedReach,
-            uniqueAudience: knownUniqueCeiling > 0 ? knownUniqueCeiling : null,
+            uniqueAudience: estimatedAudience > 0 ? estimatedAudience : null,
             estimatedAvails,
             estimatedImpressions,
             averageCpm,
-            estimatedFrequency:
-                estimatedReach > 0 ? Math.round((estimatedImpressions / estimatedReach) * 10) / 10 : null,
+            estimatedFrequency: estimatedReach > 0 ? Math.round(frequency * 10) / 10 : null,
         },
         flight: {
             startDate: input.campaign.startDate,
@@ -349,11 +468,18 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
             dspCompatible: input.buying.dspChoice !== null,
             rateCard: tier,
         },
+        unspentBudget,
         // User-configurable exclusion lists (categoriesToAvoid/brandSafetyExclusions) were
         // removed from the input form — only the hardcoded keyword floor (planner.candidates.ts)
         // still applies, to every plan, unconditionally.
         brandSafety: {
             exclusionsApplied: [...DEFAULT_UNSAFE_KEYWORDS],
+        },
+        internal: {
+            marginPercent: config.plannerMarginPercent,
+            clientSpend,
+            mediaCost,
+            commission: clientSpend - mediaCost,
         },
     };
 };

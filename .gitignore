@@ -7,3 +7,6 @@ lib/
 
 # AWS CloudTrail export — contains account ID, IAM usernames, access key IDs, source IPs
 cloudtrail_createuser.json
+
+# Planner batch-test outputs
+planner-batch-results-*.json

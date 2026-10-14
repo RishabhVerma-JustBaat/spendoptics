@@ -110,6 +110,8 @@ export const ROLES = [
     'cost-efficient',
     'audience-fit',
     'preferred',
+    /** Pulled in beyond the line's normal pick count because the original picks had filled up — see allocation.service.ts's pourIntoLine. */
+    'spillover',
 ] as const;
 export type Role = (typeof ROLES)[number];
 
@@ -133,6 +135,8 @@ export interface PlannerInput {
         regionalTargets: { region: string; impressions: number }[];
     };
     audience: {
+        /** The country this ask is for — never left blank (defaults to "India", this platform's only real market) so generate() can reject up front when it names anywhere else, rather than silently substituting Indian inventory for a request about a market with no real data behind it at all. */
+        country: string | null;
         geoScope: GeoScope | null;
         states: string[];
         excludeStates: string[];
@@ -205,6 +209,10 @@ export interface RecommendedInventoryItem {
     /** This item's own share of the line's budget/impressions — 0 for both when no campaign.budget was given at all, same as the line-level totals they're drawn from. */
     amount: number;
     impressions: number;
+    /** Unique people reached on this item — impressions ÷ campaign frequency (see allocation.service.ts's campaignFrequency). */
+    reach: number;
+    /** Audience pool behind that reach — reach ÷ REACH_SHARE_OF_AUDIENCE. Not the same thing as uniqueAudience above, which is the sheet's raw figure and only feeds candidate scoring. */
+    audience: number;
 }
 
 export interface BudgetAllocationLine {
@@ -212,6 +220,9 @@ export interface BudgetAllocationLine {
     sharePercent: number;
     amount: number;
     impressions: number;
+    /** Sums of this line's per-item reach/audience. */
+    reach: number;
+    audience: number;
     reason: string | null;
     recommendedInventory: RecommendedInventoryItem[];
 }
@@ -260,6 +271,8 @@ export interface GeneratedPlanCore {
     kpiFit: KpiFitResult[];
     deliveryFit: DeliveryFitResult | null;
     cpmFit: CpmFitResult[];
+    /** Budget that couldn't be placed because every eligible item hit its MAX_FILL ceiling — 0 when the whole budget was placed. */
+    unspentBudget: number;
     buying: {
         dealType: (typeof DEAL_TYPES)[number] | null;
         dspCompatible: boolean;
@@ -267,6 +280,13 @@ export interface GeneratedPlanCore {
     };
     brandSafety: {
         exclusionsApplied: string[];
+    };
+    /** Our side of the plan, not for the client: every cpm/amount above is the client price (cost + marginPercent), so clientSpend = mediaCost + commission. Computed but never sent — mergePlan drops it from the response until there's an internal-only way to request it. */
+    internal: {
+        marginPercent: number;
+        clientSpend: number;
+        mediaCost: number;
+        commission: number;
     };
 }
 
@@ -334,6 +354,7 @@ export interface GeneratedPlan {
         recommendedInventory: RecommendedInventoryItem[];
     })[];
     plannedByTeam: GeneratedPlanCore['plannedByTeam'];
+    unspentBudget: GeneratedPlanCore['unspentBudget'];
     audience: {
         targetGroup: PlanNarration['targetGroup'];
     };

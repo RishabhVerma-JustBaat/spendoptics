@@ -16,7 +16,6 @@ const prisma = new PrismaClient();
 const toInt = value => Math.round(Number(value) || 0);
 const toBigInt = value => BigInt(Math.round(Number(value) || 0));
 const toFloat = value => Number(value) || 0;
-const toNullableFloat = value => (value === null || value === undefined || value === '' ? null : Number(value));
 const toStr = value => (value === null || value === undefined ? '' : String(value).trim());
 const toNullableStr = value => (value === null || value === undefined || value === '' ? null : String(value).trim());
 
@@ -59,6 +58,42 @@ const parseDemographics = str => {
         age4554Pct: age4554,
         age55PlusPct: age55Plus,
     };
+};
+
+/**
+ * Parses the sheet's "CTR/VCR" column, a string like "65%+" or "0.20%+" (always a trailing "%",
+ * sometimes a "+") into a plain 0-100 percentage number. Verified live against all 30,585 rows in
+ * the 2026-10-14 source file — zero format mismatches. Returns null (not 0) for anything that
+ * doesn't match, since 0 would misreport "no data" as "zero percent".
+ */
+const parseCtrVcrPercent = str => {
+    if (!str) return null;
+    const match = String(str).match(/^([\d.]+)%/);
+    return match ? Number(match[1]) : null;
+};
+
+/**
+ * Parses the sheet's single free-text "Wallet size" column (e.g. "T1 Premium (₹1,00,000+
+ * household/month) 8%, T2 Upper-middle (₹60,000–₹99,999) 17%, T3 Middle (₹30,000–₹59,999) 30%,
+ * T4 Lower-middle (₹15,000–₹29,999) 28%, T5 Value (under ₹15,000) 17%") into the 5 tier
+ * percentages. Positional like parseDemographics above — verified live that all 30,585 rows have
+ * exactly this shape (same 5 tiers, same order, every time), so the tier labels/income ranges
+ * aren't stored at all (a fixed, repeated taxonomy, not real per-row data); only the percentages
+ * that actually vary are kept.
+ */
+const parseWalletSize = str => {
+    const empty = {
+        walletT1Pct: null,
+        walletT2Pct: null,
+        walletT3Pct: null,
+        walletT4Pct: null,
+        walletT5Pct: null,
+    };
+    if (!str) return empty;
+    const pcts = [...String(str).matchAll(/(\d+(?:\.\d+)?)%/g)].map(m => Number(m[1]));
+    if (pcts.length !== 5) return empty;
+    const [walletT1Pct, walletT2Pct, walletT3Pct, walletT4Pct, walletT5Pct] = pcts;
+    return { walletT1Pct, walletT2Pct, walletT3Pct, walletT4Pct, walletT5Pct };
 };
 
 /** Reads a sheet as a raw array-of-arrays (not object-keyed) — one of this data's sheets has a trailing column with no header, which sheet_to_json's default object mode silently drops. */
@@ -179,12 +214,15 @@ async function ingestWebsites(workbook) {
         eCpm: toFloat(r[8]),
         buyingCpm: toFloat(r[9]),
         floorCpm: toFloat(r[10]),
-        // Columns 11-12 ("CTR/VCR", "Demographics") only exist in the 2026-10-13
-        // "Demographics-By-Inventory" file — undefined (not present) on an older sheet with just
-        // the original 11 columns, which toNullableFloat/parseDemographics both treat as null
-        // rather than guessing.
-        ctrVcr: toNullableFloat(r[11]),
+        // Columns 11-13 ("CTR/VCR", "Demographics", "Wallet size") only exist from the
+        // 2026-10-13 "Demographics-By-Inventory" file onward — undefined (not present) on an
+        // older sheet with just the original 11 columns, which every parser here treats as null
+        // rather than guessing. CTR/VCR's own format changed again in the 2026-10-14
+        // "WalletSize-CTR-VTR-Updated" file, from a raw fraction (0.705) to a percentage string
+        // ("65%+") — parseCtrVcrPercent handles the current string format.
+        ctrVcr: parseCtrVcrPercent(r[11]),
         ...parseDemographics(r[12]),
+        ...parseWalletSize(r[13]),
     }));
     await prisma.inventoryWebsite.deleteMany();
     await insertInBatches(prisma.inventoryWebsite, data);

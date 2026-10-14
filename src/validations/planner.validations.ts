@@ -89,6 +89,7 @@ export const generatePlanSchema = Joi.object({
     }).default(),
 
     audience: Joi.object({
+        country: Joi.string().allow(null).empty('').default(null),
         geoScope: Joi.string()
             .valid(...GEO_SCOPES)
             .allow(null).empty('')

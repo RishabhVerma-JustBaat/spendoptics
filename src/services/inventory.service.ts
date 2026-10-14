@@ -22,3 +22,22 @@ export const getIabCategories = async (): Promise<string[]> => {
     cachedCategories = rows.map(r => r.category);
     return cachedCategories;
 };
+
+let cachedCountries: string[] | null = null;
+
+/**
+ * The real country/countries the ingested inventory actually covers — read from
+ * inventory_mobile_ott.country (the only table with a literal country column; websites' own
+ * "geography" column uses "PAN IN" as its equivalent of the same market, not a second one).
+ * This is the only real, data-backed source of truth for "do we even have inventory for the
+ * market this request is asking about" — never hardcoded, so it tracks whatever the ingested
+ * sheets actually cover if that ever changes, instead of silently going stale.
+ */
+export const getSupportedCountries = async (): Promise<string[]> => {
+    if (cachedCountries) return cachedCountries;
+    const rows = await prisma.$queryRawUnsafe<{ country: string }[]>(
+        `SELECT DISTINCT country FROM inventory_mobile_ott ORDER BY country`
+    );
+    cachedCountries = rows.map(r => r.country);
+    return cachedCountries;
+};

@@ -41,6 +41,9 @@ const parseKeyValue = (entry: string): { key: string; value: string } | null => 
 
 export type Provenance = 'stated' | 'inferred' | 'assumed';
 
+/** Last-resort fallback when the model fails to follow the "budget can never be left out" rule (verified live: happens occasionally on long, data-dense briefs). Not a sophisticated estimate — just a round, clearly-arbitrary placeholder the planner is expected to review and correct, same as any other "assumed" field. */
+const DEFAULT_ASSUMED_BUDGET = 1000000;
+
 /** A blank form — every field null/empty/the product-level default, nothing suggested yet. generateSuggestions below fills fields in on top of this one at a time, so any field the model didn't address at all is left in this safe, honest "unset" state rather than missing from the object. */
 export const buildEmptyPlannerInput = (): PlannerInput => ({
     rawPrompt: null,
@@ -57,6 +60,7 @@ export const buildEmptyPlannerInput = (): PlannerInput => ({
         regionalTargets: [],
     },
     audience: {
+        country: null,
         geoScope: null,
         states: [],
         excludeStates: [],
@@ -112,7 +116,7 @@ const FIELD_VALIDATORS: Record<string, (value: unknown) => boolean> = {
                 k !== null &&
                 (KPI_METRICS as readonly string[]).includes((k as { metric: string }).metric)
         ),
-    'campaign.budget': v => typeof v === 'number' && v >= 0,
+    'campaign.budget': v => typeof v === 'number' && v > 0,
     'campaign.startDate': v => typeof v === 'string',
     'campaign.endDate': v => typeof v === 'string',
     'campaign.campaignMonth': v => typeof v === 'string',
@@ -128,6 +132,7 @@ const FIELD_VALIDATORS: Record<string, (value: unknown) => boolean> = {
                 typeof (t as { impressions: unknown }).impressions === 'number' &&
                 (t as { impressions: number }).impressions >= 0
         ),
+    'audience.country': v => typeof v === 'string',
     'audience.geoScope': v => (GEO_SCOPES as readonly string[]).includes(v as string),
     'audience.states': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'audience.excludeStates': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
@@ -189,7 +194,7 @@ const buildSuggestSchema = () =>
 
 const FIELD_REFERENCE = `brand.name (text — ONLY if literally stated, never inferred/assumed), brand.category (text — your own inference from the brand, not a fixed list; leave out if the brand gives no real signal)
 campaign.objective (one of: ${OBJECTIVES.join(', ')}), campaign.kpis (list of {"metric":"vcr"|"ctr","target":number|null} — ONLY these 2 metrics, nothing else), campaign.budget (number, INR, no shorthand — "50 Lakh" -> 5000000, "1 Crore" -> 10000000 — NEVER leave this out, always give a real number even if assumed), campaign.startDate/campaign.endDate (YYYY-MM-DD), campaign.campaignMonth (YYYY-MM, only if exact dates aren't known), campaign.seasonality (text), campaign.pacing (one of: ${PACINGS.join(', ')}), campaign.regionalTargets (list of {"region":text,"impressions":number} — see the table-parsing rule below)
-audience.geoScope (one of: ${GEO_SCOPES.join(', ')}), audience.states (text list, only used when geoScope is "states"), audience.excludeStates (text list — ONLY if literally stated, never inferred/assumed), audience.gender (one of: ${GENDERS.join(', ')} — NEVER leave this out), audience.ageGroups (list from: ${AGE_GROUPS.join(', ')} — NEVER leave this out)
+audience.country (text — the real-world country this ask is for, e.g. "India", "USA" — NEVER leave this out; default "India" unless the brief clearly names somewhere else), audience.geoScope (one of: ${GEO_SCOPES.join(', ')}), audience.states (text list, only used when geoScope is "states"), audience.excludeStates (text list — ONLY if literally stated, never inferred/assumed), audience.gender (one of: ${GENDERS.join(', ')} — NEVER leave this out), audience.ageGroups (list from: ${AGE_GROUPS.join(', ')} — NEVER leave this out)
 inventory.platforms (list from: ${PLATFORMS.join(', ')} — "ctv-oem"/"ctv-fast" both mean ad-supported FAST channels like Samsung TV Plus/TCL Channel; "ctv-ott" means on-demand CTV apps like JioHotstar/ZEE5/MX Player; plain "ctv" means both), inventory.mediaTypes (list from: ${MEDIA_TYPES.join(', ')}), inventory.iabCategories (text list, only real categories, see rule below), inventory.qualityTier (one of: ${QUALITY_TIERS.join(', ')}), inventory.preferredSitesApps/blockedSitesApps (text lists — ONLY if literally stated, never inferred/assumed), inventory.minViewabilityPct/minVcrPct (0-100), inventory.maxCpm (INR, a single overall cap — only use this when one CPM applies to everything), inventory.minAvails/minUniqueAudience (numbers), inventory.channelCpmTargets (list of {"platform":one of the platform values above,"maxCpm":number} — use this instead of maxCpm whenever different platforms are asked about at different rates, e.g. "₹130 for OTT-CTV, ₹100 for FAST")
 creative.displayFormats/displaySizes (text lists), creative.videoPlacements (list from: ${VIDEO_PLACEMENTS.join(', ')}), creative.videoDurations (list from: ${VIDEO_DURATIONS.join(', ')}), creative.skippability (list from: ${SKIPPABILITY.join(', ')})
 buying.dspChoice (one of: ${DSP_CHOICES.join(', ')} — ONLY if literally stated, never inferred/assumed), buying.spendoptixDspRoute (one of: ${SPENDOPTIX_DSP_ROUTES.join(', ')}, only if dspChoice is spendoptix-dsp), buying.ownDspNames (text list, only if dspChoice is own-dsp), buying.seatId (text), buying.dealType (one of: ${DEAL_TYPES.join(', ')}), buying.frequencyCap ({"impressions":number,"period":"${FREQUENCY_CAP_PERIODS.join('"|"')}"})
@@ -211,7 +216,9 @@ A separate set of fields works the other way around — they may ONLY ever be ta
 
 A brief may list several platforms/devices tied to different named properties in one go (e.g. "Mobile for X, CTV for Y", or a bulleted device list) — capture every platform actually named into inventory.platforms, not just the first one, and tag each "stated" (not "inferred") since the brief named it directly.
 
-Two fields are the opposite again — they can never be left out no matter how thin the brief is: audience.gender and audience.ageGroups must always get a real value, "assumed" if nothing else justifies it. "campaign.budget" also can never be left out (unlike the general escape hatch below) — always give a real number, "assumed" if the brief implies nothing, since the planner needs a starting figure to react to and adjust rather than a blank field.
+Three fields are the opposite again — they can never be left out no matter how thin the brief is: audience.gender, audience.ageGroups, and audience.country must always get a real value, "assumed" if nothing else justifies it (audience.country specifically assumes "India" with no other signal — this platform's real inventory is India-only, so that's the honest default, never a blank). "campaign.budget" also can never be left out (unlike the general escape hatch below) — always give a real positive number greater than zero, "assumed" if the brief implies nothing, since the planner needs a starting figure to react to and adjust rather than a blank field. These four fields are worth extra attention on a long or data-dense brief (e.g. one with a big region/impressions table) — it's easy to spend all your attention extracting the table and forget these still need a value; double-check all four are present before finishing.
+
+If a brief clearly describes a location outside India (a US state, a foreign city, a non-Indian country), state that real country in audience.country as "stated" or "inferred" rather than defaulting to "India" — this platform's real inventory only covers India, so correctly naming a different country lets the system tell the planner honestly that it can't help with this request, instead of silently recommending Indian inventory for somewhere else entirely.
 
 Whenever a field is genuinely, explicitly stated in the brief, that stated value always wins — these special cases above only govern what happens when nothing was said.
 
@@ -302,6 +309,20 @@ export const generateSuggestions = async (
         if (applySuggestion(input, parsed.field, parsed.value)) {
             provenance[parsed.field] = parsed.provenance;
         }
+    }
+
+    // Safety net for the one field this contract can least afford to go missing: the prompt
+    // tells the model budget can never be left out, but verified live that on a long/data-dense
+    // brief (e.g. a big region/impressions table) it occasionally still does. A code-level
+    // fallback guarantees the output contract holds even when the model's own compliance
+    // doesn't — tagged "assumed" like any other default, since that's exactly what it is.
+    if (input.campaign.budget === null) {
+        input.campaign.budget = DEFAULT_ASSUMED_BUDGET;
+        provenance['campaign.budget'] = 'assumed';
+    }
+    if (input.audience.country === null) {
+        input.audience.country = 'India';
+        provenance['audience.country'] = 'assumed';
     }
 
     return { input, provenance };
@@ -396,6 +417,7 @@ ${core.budgetAllocation
     .join('\n')}
 
 Key figures (already decided): ${JSON.stringify(core.keyFigures)}
+Budget left unspent because the available inventory filled up (already decided — mention it plainly in the summary if above 0): ₹${core.unspentBudget}
 KPI fit (already decided): ${JSON.stringify(core.kpiFit)}
 Platforms that couldn't be planned automatically: ${JSON.stringify(core.plannedByTeam)}`;
 };
@@ -499,7 +521,7 @@ const buildCurveCommentarySystemPrompt = (): string =>
 Hard rules:
 1. "givenVsRecommendedBudgetReason" is one sentence explaining the budget verdict you're given, citing the actual reach/cost numbers you're given — null if no budget verdict was computed (the user didn't give a budget).
 2. "givenVsRecommendedCpmReason" is the same for the CPM verdict — null if none was computed.
-3. "benefitSummary" is 3-5 short lines in plain words on what the user gains by following the recommended dates/budget/CPM instead of their own inputs — grounded only in the numbers you're given, nothing invented.
+3. "benefitSummary" is 3-5 short lines in plain words on what the user gains by following the recommended dates/budget/CPM instead of their own inputs — grounded only in the numbers you're given, nothing invented. When the budget curve has no recommended levels, the user's budget is final — never suggest spending more or less than it.
 4. All money amounts are in Indian Rupees — use "₹", never "$" or "USD", anywhere you mention an amount.`;
 
 const buildCurveCommentaryPrompt = (
@@ -574,6 +596,7 @@ export const mergePlan = (
         })),
     })),
     plannedByTeam: core.plannedByTeam,
+    unspentBudget: core.unspentBudget,
     audience: { targetGroup: narration.targetGroup },
     buying: { ...core.buying, dealType: input.buying.dealType },
     brandSafety: core.brandSafety,
@@ -583,4 +606,6 @@ export const mergePlan = (
         cpmFit: core.cpmFit,
         assumptions: narration.assumptions,
     },
+    // core.internal (media cost/commission) is deliberately left out — this response reaches
+    // the planner's screen, and our margin isn't theirs to see.
 });

@@ -6,8 +6,13 @@ import {
     PlannerInput,
     RateTier,
 } from '../types/planner.types';
+import { config } from '../config/environment';
 
 const prisma = new PrismaClient();
+
+/** The client-facing CPM: the sheet's cost CPM plus our flat margin (config.plannerMarginPercent). Applied here, at load time, so every filter (maxCpm), score, split, curve and cpmFit check downstream works in the price the client actually pays. */
+export const clientCpm = (costCpm: number): number =>
+    Math.round(costCpm * (1 + config.plannerMarginPercent / 100) * 100) / 100;
 
 /**
  * One platform can draw from more than one line (a bare "ctv" request wants both FAST and OTT
@@ -29,13 +34,48 @@ export const PLATFORM_LINE_MAP: Record<Platform, InventoryLine[]> = {
     youtube: [], // no real data — always routed to plannedByTeam, never a candidate
 };
 
+/** Strips everything but letters/digits so formatting differences ("Tarang Plus" vs. the real sheet's "TarangPlus", "Haystack TV" vs. "haystacktv.com") don't break an otherwise-obvious match. */
+const compact = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/** True if `term` appears in `value` with a real boundary on both sides (string start/end, or any non-alphanumeric character) — not just anywhere as a raw substring. */
+const hasWordBoundaryMatch = (value: string, term: string): boolean => {
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, 'i').test(value);
+};
+
 const caseInsensitiveMatch = (value: string, list: string[]): boolean => {
+    if (!value) return false; // an empty value would otherwise match every entry via ''.includes()
     const lower = value.toLowerCase();
+    const valueCompact = compact(value);
     return list.some(entry => {
         const e = entry.toLowerCase().trim();
-        return e.length > 0 && (lower.includes(e) || e.includes(lower));
+        if (e.length === 0) return false;
+        // Short terms (acronyms especially) are prone to coincidental substring collisions —
+        // verified live that "WSJ" (3 chars) genuinely, literally appears inside
+        // "actionnewsjax.com" with no compacting involved at all ("new" + "s" + "jax" already run
+        // together with no separator in the real domain name). A plain .includes() can't tell
+        // that apart from a real "wsj.com" match, so short terms require a real boundary (string
+        // start/end or a non-alphanumeric character) on both sides instead.
+        if (e.length < 5) return hasWordBoundaryMatch(value, e) || hasWordBoundaryMatch(e, value);
+        if (lower.includes(e) || e.includes(lower)) return true;
+        // Compacting (stripping spaces/punctuation) catches a real multi-word name variant that
+        // the raw check above misses entirely — e.g. "Tarang Plus" vs. the sheet's "TarangPlus",
+        // which has no boundary between the two words at all to match on.
+        const eCompact = compact(entry);
+        return eCompact.length > 0 && (valueCompact.includes(eCompact) || eCompact.includes(valueCompact));
     });
 };
+
+/**
+ * For matching against a raw technical identifier (package id / app URL slug) rather than a real
+ * display name — verified live that a short preferred term can coincidentally collide inside an
+ * unrelated concatenated id (e.g. "WSJ" matching inside "com.playvalve.wsjourney", a
+ * word-search-journey puzzle game with zero connection to the Wall Street Journal). Requiring at
+ * least 5 characters before trying this match at all avoids that; short acronyms still match
+ * fine against real display names via caseInsensitiveMatch above.
+ */
+const caseInsensitiveMatchId = (value: string, list: string[]): boolean =>
+    caseInsensitiveMatch(value, list.filter(entry => entry.trim().length >= 5));
 
 /**
  * A floor, not a configurable exclusion — applied regardless of what the input specifies.
@@ -81,10 +121,13 @@ export const computeRateTier = (input: PlannerInput): RateTier => {
     return tier;
 };
 
-const isBlocked = (name: string, input: PlannerInput): boolean =>
-    caseInsensitiveMatch(name, input.inventory.blockedSitesApps);
-const isPreferred = (name: string, input: PlannerInput): boolean =>
-    caseInsensitiveMatch(name, input.inventory.preferredSitesApps);
+/** `url` is a raw technical identifier (package id / app URL), not a display name — matched via caseInsensitiveMatchId's short-term guard, never the full caseInsensitiveMatch. */
+const isBlocked = (name: string, url: string, input: PlannerInput): boolean =>
+    caseInsensitiveMatch(name, input.inventory.blockedSitesApps) ||
+    caseInsensitiveMatchId(url, input.inventory.blockedSitesApps);
+const isPreferred = (name: string, url: string, input: PlannerInput): boolean =>
+    caseInsensitiveMatch(name, input.inventory.preferredSitesApps) ||
+    caseInsensitiveMatchId(url, input.inventory.preferredSitesApps);
 
 const passesVolumeFilters = (
     avails: number,
@@ -109,7 +152,7 @@ const fetchCtvCandidates = async (input: PlannerInput, tier: RateTier): Promise<
     const rows = await prisma.inventoryCtvInventory.findMany();
     const cpmColumn = tier === 'open' ? 'cpmOpen' : tier === 'premium' ? 'cpmPremiumAudience' : 'cpmAdvanced';
     return rows
-        .filter(r => !isBlocked(r.applicationName, input) && !isBlocked(r.appUrl, input))
+        .filter(r => !isBlocked(r.applicationName, r.appUrl, input))
         .filter(r => !failsBrandSafety(r.applicationName) && !failsBrandSafety(r.appUrl))
         .map(r => ({
             id: r.appUrl,
@@ -121,14 +164,25 @@ const fetchCtvCandidates = async (input: PlannerInput, tier: RateTier): Promise<
             platform: (r.type === 'OEM' ? 'ctv-fast' : 'ctv-ott') as Platform,
             avails: Number(r.totalImpressions),
             uniqueAudience: Number(r.totalUniques),
-            cpm: r[cpmColumn],
+            cpm: clientCpm(r[cpmColumn]),
             vcr: r.vcr,
             iabCategories: null, // no category column in this sheet
-            isPreferred: isPreferred(r.applicationName, input) || isPreferred(r.appUrl, input),
+            isPreferred: isPreferred(r.applicationName, r.appUrl, input),
         }))
-        .filter(c => input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
-        .filter(c => input.inventory.minVcrPct === null || (c.vcr ?? 0) * 100 >= input.inventory.minVcrPct)
-        .filter(c => passesVolumeFilters(c.avails, c.uniqueAudience, input));
+        // A property named in preferredSitesApps bypasses these — they're meant to narrow
+        // general discovery, not to hide a specifically-asked-about property that happens not to
+        // clear a bar meant for everything else (verified live: wsj.com is tagged "IAB5
+        // Education" in the real sheet, not the "IAB3 Business" a brief about financial
+        // publishers would naturally filter to — a hard filter would hide it even though it was
+        // named explicitly).
+        .filter(c => c.isPreferred || input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
+        .filter(
+            c =>
+                c.isPreferred ||
+                input.inventory.minVcrPct === null ||
+                (c.vcr ?? 0) * 100 >= input.inventory.minVcrPct
+        )
+        .filter(c => c.isPreferred || passesVolumeFilters(c.avails, c.uniqueAudience, input));
 };
 
 const fetchMobileOttCandidates = async (
@@ -138,7 +192,7 @@ const fetchMobileOttCandidates = async (
     const rows = await prisma.inventoryMobileOttInventory.findMany();
     const cpmColumn = tier === 'open' ? 'cpmOpen' : tier === 'premium' ? 'cpmPremiumAudience' : 'cpmAdvanced';
     return rows
-        .filter(r => !isBlocked(r.appName, input) && !isBlocked(r.packageId, input))
+        .filter(r => !isBlocked(r.appName, r.packageId, input))
         .filter(r => !failsBrandSafety(r.appName) && !failsBrandSafety(r.packageId))
         .map(r => ({
             id: r.packageId,
@@ -148,28 +202,37 @@ const fetchMobileOttCandidates = async (
             avails: Number(r.totalAvails),
             // No separate uniques column in this sheet — left null rather than estimated.
             uniqueAudience: null,
-            cpm: r[cpmColumn],
+            cpm: clientCpm(r[cpmColumn]),
             vcr: r.vcr,
             iabCategories: null, // no category column in this sheet
-            isPreferred: isPreferred(r.appName, input) || isPreferred(r.packageId, input),
+            isPreferred: isPreferred(r.appName, r.packageId, input),
         }))
-        .filter(c => input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
-        .filter(c => input.inventory.minVcrPct === null || (c.vcr ?? 0) * 100 >= input.inventory.minVcrPct)
-        .filter(c => passesVolumeFilters(c.avails, c.uniqueAudience, input));
+        .filter(c => c.isPreferred || input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
+        .filter(
+            c =>
+                c.isPreferred ||
+                input.inventory.minVcrPct === null ||
+                (c.vcr ?? 0) * 100 >= input.inventory.minVcrPct
+        )
+        .filter(c => c.isPreferred || passesVolumeFilters(c.avails, c.uniqueAudience, input));
 };
 
 const fetchWebsiteCandidates = async (input: PlannerInput): Promise<CandidateInventoryItem[]> => {
-    const where: Record<string, unknown> = {};
-    if (input.inventory.mediaTypes.length > 0) {
-        where.adFormat = { in: input.inventory.mediaTypes.map(m => (m === 'display' ? 'Display' : 'Video')) };
-    }
-    if (input.inventory.iabCategories.length > 0) {
-        where.iabCategories = { hasSome: input.inventory.iabCategories };
-    }
-    const rows = await prisma.inventoryWebsite.findMany({ where });
+    // mediaTypes/iabCategories used to narrow this at the DB query level, but that could hide a
+    // specifically-named preferredSitesApps match entirely before isPreferred is even computed
+    // (verified live: wsj.com is tagged "IAB5 Education" in the real sheet, not "IAB3 Business").
+    // Fetching unfiltered and narrowing in JS instead (consistent with how the other three fetch
+    // functions already work) lets a named match bypass these — 30k rows is small enough that
+    // this costs nothing meaningful.
+    const rows = await prisma.inventoryWebsite.findMany();
+    const wantedAdFormats: string[] | null =
+        input.inventory.mediaTypes.length > 0
+            ? input.inventory.mediaTypes.map(m => (m === 'display' ? 'Display' : 'Video'))
+            : null;
     return rows
-        .filter(r => !isBlocked(r.inventoryName, input))
+        .filter(r => !isBlocked(r.inventoryName, '', input))
         .filter(r => !failsBrandSafety(r.inventoryName))
+        .filter(r => isPreferred(r.inventoryName, '', input) || !wantedAdFormats || wantedAdFormats.includes(r.adFormat))
         .map(r => ({
             id: r.inventoryName,
             name: r.inventoryName,
@@ -177,29 +240,40 @@ const fetchWebsiteCandidates = async (input: PlannerInput): Promise<CandidateInv
             platform: 'web' as Platform,
             avails: Number(r.totalImpressions),
             uniqueAudience: r.totalUniqueAudience === null ? null : Number(r.totalUniqueAudience),
-            cpm: r.buyingCpm,
+            cpm: clientCpm(r.buyingCpm),
             vcr: null, // not present in this sheet
             iabCategories: r.iabCategories,
-            isPreferred: isPreferred(r.inventoryName, input),
+            isPreferred: isPreferred(r.inventoryName, '', input),
         }))
-        .filter(c => input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
-        .filter(c => passesVolumeFilters(c.avails, c.uniqueAudience, input));
+        .filter(
+            c =>
+                c.isPreferred ||
+                input.inventory.iabCategories.length === 0 ||
+                c.iabCategories.some(cat => input.inventory.iabCategories.includes(cat))
+        )
+        .filter(c => c.isPreferred || input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
+        .filter(c => c.isPreferred || passesVolumeFilters(c.avails, c.uniqueAudience, input));
 };
 
 const fetchInAppCandidates = async (input: PlannerInput): Promise<CandidateInventoryItem[]> => {
-    const where: Record<string, unknown> = {};
-    if (input.inventory.mediaTypes.length > 0) {
-        where.adFormat = { in: input.inventory.mediaTypes.map(m => (m === 'display' ? 'Display' : 'Video')) };
-    }
-    const rows = await prisma.inventoryMobileInApp.findMany({ where });
+    // mediaTypes narrowed this at the DB query level before — moved to JS (see
+    // fetchWebsiteCandidates's comment for why) so a preferredSitesApps name match isn't hidden
+    // by it.
+    const rows = await prisma.inventoryMobileInApp.findMany();
+    const wantedAdFormats: string[] | null =
+        input.inventory.mediaTypes.length > 0
+            ? input.inventory.mediaTypes.map(m => (m === 'display' ? 'Display' : 'Video'))
+            : null;
     return rows
-        // 0 means no real price in this sheet at all, not a free placement. Not filtering any
-        // further than that — this assumes the sheet's own pricing is trustworthy once
-        // populated; a messier snapshot is a data-ingestion problem to fix at the source
-        // (scripts/ingest-inventory.js), not something to compensate for with a guessed floor.
+        // 0 means no real price in this sheet at all, not a free placement — never bypassed even
+        // for a preferred match, since a zero CPM would divide-by-zero downstream in the
+        // allocation math, not just under-rank the item.
         .filter(r => r.eCpm > 0)
-        .filter(r => !isBlocked(r.appName, input) && !isBlocked(r.inventoryUrl, input))
+        .filter(r => !isBlocked(r.appName, r.inventoryUrl, input))
         .filter(r => !failsBrandSafety(r.appName) && !failsBrandSafety(r.inventoryUrl))
+        .filter(
+            r => isPreferred(r.appName, r.inventoryUrl, input) || !wantedAdFormats || wantedAdFormats.includes(r.adFormat)
+        )
         .map(r => ({
             id: r.inventoryUrl,
             name: r.appName,
@@ -207,13 +281,13 @@ const fetchInAppCandidates = async (input: PlannerInput): Promise<CandidateInven
             platform: 'in-app' as Platform,
             avails: Number(r.totalRequests),
             uniqueAudience: null, // not present in this sheet
-            cpm: r.eCpm,
+            cpm: clientCpm(r.eCpm),
             vcr: null, // not present in this sheet
             iabCategories: null, // no category column in this sheet
-            isPreferred: isPreferred(r.appName, input) || isPreferred(r.inventoryUrl, input),
+            isPreferred: isPreferred(r.appName, r.inventoryUrl, input),
         }))
-        .filter(c => input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
-        .filter(c => passesVolumeFilters(c.avails, c.uniqueAudience, input));
+        .filter(c => c.isPreferred || input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
+        .filter(c => c.isPreferred || passesVolumeFilters(c.avails, c.uniqueAudience, input));
 };
 
 export interface CandidateResult {
@@ -239,6 +313,35 @@ export const buildCandidateInventory = async (input: PlannerInput): Promise<Cand
         websites: linesNeeded.has('websites') ? await fetchWebsiteCandidates(input) : [],
         'in-app': linesNeeded.has('in-app') ? await fetchInAppCandidates(input) : [],
     };
+
+    // A brief naming a specific property in inventory.preferredSitesApps is asking "do you have
+    // X" — verified live that the honest answer can depend entirely on which line the suggest
+    // call happened to guess for it (e.g. "Tarang Plus" named under "mobile" only actually exists
+    // in the in-app table, not mobile-ott; "Haystack TV" only exists in websites/in-app, not
+    // ctv). Check every line NOT already covered by the requested platforms for a literal name
+    // match, and pull in only the matched item(s) — never that line's whole generic inventory.
+    // This never removes or overrides anything from the lines actually requested; it only adds a
+    // transparent answer to a question asked by name, and each match keeps its own real
+    // .line/.platform so the output honestly shows where it actually lives even when that's a
+    // different platform than first assumed. (Known limitation: a match here still has to pass
+    // the same maxCpm/minVcrPct/volume filters as everything else, since those run inside each
+    // fetch function — a named property priced or sized outside those filters still won't surface.)
+    if (input.inventory.preferredSitesApps.length > 0) {
+        if (!ctvNeeded) {
+            for (const c of (await fetchCtvCandidates(input, tier)).filter(c => c.isPreferred)) {
+                byLine[c.line].push(c);
+            }
+        }
+        if (!linesNeeded.has('mobile-ott')) {
+            byLine['mobile-ott'].push(...(await fetchMobileOttCandidates(input, tier)).filter(c => c.isPreferred));
+        }
+        if (!linesNeeded.has('websites')) {
+            byLine.websites.push(...(await fetchWebsiteCandidates(input)).filter(c => c.isPreferred));
+        }
+        if (!linesNeeded.has('in-app')) {
+            byLine['in-app'].push(...(await fetchInAppCandidates(input)).filter(c => c.isPreferred));
+        }
+    }
 
     // A platform maps to one or more lines (see PLATFORM_LINE_MAP) — it's only truly
     // unplannable if every line it could mean came back with nothing at all.
