@@ -76,8 +76,10 @@ export const generatePlanSchema = Joi.object({
             )
             .default([]),
         budget: Joi.number().integer().min(0).allow(null).empty('').default(null),
-        startDate: Joi.string().isoDate().allow(null).empty('').default(null),
-        endDate: Joi.string().isoDate().allow(null).empty('').default(null),
+        // Plain YYYY-MM-DD: Joi's isoDate() would rewrite it to a full timestamp. Whether it's a
+        // real date (no "2026-02-31") is checked later, in findInvalidValues.
+        startDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).allow(null).empty('').default(null),
+        endDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).allow(null).empty('').default(null),
         campaignMonth: Joi.string().allow(null).empty('').default(null),
         seasonality: Joi.string().allow(null).empty('').default(null),
         pacing: Joi.string()
