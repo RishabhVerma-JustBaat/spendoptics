@@ -36,32 +36,23 @@ import { config } from '../config/environment';
 const normalize = (value: number, max: number): number => (max > 0 ? value / max : 0);
 
 /**
- * How attractive one candidate is, before preferred adjustments. Split into two trust tiers:
- * "high trust" signals are directly comparable across every candidate regardless of which sheet
- * it came from (volume, price, and a real IAB-category match against what was actually asked
- * for) and dominate the score; "low trust" signals (VCR, unique audience) are real but only
- * exist for some lines, don't speak to volume or price at all, and only ever nudge the ranking
- * rather than compete with it. The weighting beyond that depends on plannerSettings.optimiseFor
- * — "viewability" falls back to the same formula as "quality" since no ingested sheet has a
- * viewability column to optimise against at all. An explicit "quality"/"viewability" ask is the
- * one case that inverts the trust weighting on purpose — a stated preference overrides the
- * default, same precedent as "stated" beating "assumed" in the suggest call.
+ * How attractive one candidate is, before preferred adjustments. matchScore (semantic closeness
+ * to the prompt and the selected interests + audience, plus the IAB match — see
+ * planner.candidates.ts's scoreMatches) is the strongest single signal in every mode, so
+ * better-matching inventory ranks higher and is poured more budget. The rest depends on
+ * plannerSettings.optimiseFor: volume, price, or the "low trust" signals (VCR, unique audience),
+ * which are real but only exist for some lines — "viewability" falls back to the same formula
+ * as "quality" since no ingested sheet has a viewability column to optimise against at all.
  */
 const scoreCandidate = (
     candidate: CandidateInventoryItem,
     maxAvails: number,
     maxCpm: number,
-    optimiseFor: PlannerInput['plannerSettings']['optimiseFor'],
-    requestedIabCategories: string[]
+    optimiseFor: PlannerInput['plannerSettings']['optimiseFor']
 ): number => {
     const reachScore = normalize(candidate.avails, maxAvails);
     const costEfficiencyScore = 1 - normalize(candidate.cpm, maxCpm); // cheaper = higher score
-    const iabMatchScore =
-        requestedIabCategories.length === 0 || candidate.iabCategories === null
-            ? 0.5 // nothing asked, or this line has no real category data — neutral, not a penalty
-            : candidate.iabCategories.some(c => requestedIabCategories.includes(c))
-              ? 1
-              : 0;
+    const match = candidate.matchScore;
 
     // vcr is a 0-100 percentage (see projectKpiFit's comment), not 0-1 — divide before blending
     // it into a 0-1 score.
@@ -71,15 +62,15 @@ const scoreCandidate = (
 
     switch (optimiseFor) {
         case 'reach':
-            return reachScore * 0.7 + iabMatchScore * 0.3;
+            return reachScore * 0.6 + match * 0.4;
         case 'cost-efficiency':
-            return costEfficiencyScore * 0.7 + iabMatchScore * 0.3;
+            return costEfficiencyScore * 0.6 + match * 0.4;
         case 'quality':
         case 'viewability':
-            return lowTrustScore * 0.7 + iabMatchScore * 0.3;
+            return lowTrustScore * 0.6 + match * 0.4;
         case 'balanced':
         default:
-            return reachScore * 0.3 + costEfficiencyScore * 0.3 + iabMatchScore * 0.25 + lowTrustScore * 0.15;
+            return match * 0.4 + reachScore * 0.2 + costEfficiencyScore * 0.2 + lowTrustScore * 0.2;
     }
 };
 
@@ -91,9 +82,21 @@ const assignRole = (candidate: CandidateInventoryItem, maxAvails: number, minCpm
     return 'audience-fit';
 };
 
-/** "concentrated" caps how many items a line can spread across, regardless of maxRecommendationsPerLine — a handful of bigger placements rather than many small ones. */
+/** Items a line grows to when maxRecommendationsPerLine is null (budget-sized) — past this, further items only join as 'spillover'. */
+const BUDGET_SIZED_MAX_ITEMS = 25;
+/**
+ * Budget-sized lines start with one item per this much of the line's budget, between 1 and
+ * BUDGET_SIZED_START_ITEMS — most properties are far larger than a plan can buy 10% of, so
+ * without a starting spread a big budget would sit on one property waiting for it to fill.
+ */
+const SPEND_PER_STARTING_ITEM = 50_000;
+const BUDGET_SIZED_START_ITEMS = 5;
+/** How many of a line's best items its score sums over, for the cross-line budget split — fixed, so a budget-sized line isn't scored on its 1 starting item. */
+const LINE_SCORE_DEPTH = 8;
+
+/** Item count for a line: the stated count, or the budget-sized ceiling; "concentrated" caps either at a handful of bigger placements. */
 const effectiveMaxForLine = (input: PlannerInput): number => {
-    const cap = input.plannerSettings.maxRecommendationsPerLine;
+    const cap = input.plannerSettings.maxRecommendationsPerLine ?? BUDGET_SIZED_MAX_ITEMS;
     if (input.plannerSettings.diversification === 'concentrated') return Math.min(cap, 3);
     return cap;
 };
@@ -109,9 +112,15 @@ interface Placement {
 interface LineSelection {
     line: InventoryLine;
     items: Placement[];
-    /** The rest of the line's candidates in rank order — pulled in as 'spillover' only once the picks fill up. */
+    /** The rest of the line's candidates in rank order — pulled in one at a time once the current items reach their target buy %. */
     reserves: { candidate: CandidateInventoryItem; score: number }[];
     lineScore: number;
+    /** Reserves join with a real role up to this many items, as 'spillover' past it. */
+    maxItems: number;
+    /** True when maxRecommendationsPerLine is null: pourIntoLine sets the starting count from the money it's given. */
+    budgetSized: boolean;
+    maxAvails: number;
+    minCpm: number;
 }
 
 const selectForLine = (
@@ -119,7 +128,7 @@ const selectForLine = (
     candidates: CandidateInventoryItem[],
     input: PlannerInput
 ): LineSelection => {
-    if (candidates.length === 0) return { line, items: [], reserves: [], lineScore: 0 };
+    if (candidates.length === 0) return { line, items: [], reserves: [], lineScore: 0, maxItems: 0, budgetSized: false, maxAvails: 0, minCpm: 0 };
 
     const maxAvails = Math.max(...candidates.map(c => c.avails));
     const maxCpm = Math.max(...candidates.map(c => c.cpm));
@@ -133,13 +142,7 @@ const selectForLine = (
             // for a specifically-named property (e.g. WSJ) to survive into the top N against
             // real CPM/avails competition from unrelated inventory.
             score:
-                scoreCandidate(
-                    c,
-                    maxAvails,
-                    maxCpm,
-                    input.plannerSettings.optimiseFor,
-                    input.inventory.iabCategories
-                ) * (c.isPreferred ? 1.2 : 1),
+                scoreCandidate(c, maxAvails, maxCpm, input.plannerSettings.optimiseFor) * (c.isPreferred ? 1.2 : 1),
         }))
         .sort((a, b) => b.score - a.score);
 
@@ -151,7 +154,12 @@ const selectForLine = (
     const rest = scored.filter(s => !s.candidate.isPreferred);
 
     const cap = effectiveMaxForLine(input);
-    const pickCount = Math.max(cap - preferred.length, 0);
+    // A stated count is picked up front. Budget-sized starts from the preferred items only;
+    // pourIntoLine adds the rest from the reserves once it knows the line's money.
+    const pickCount =
+        input.plannerSettings.maxRecommendationsPerLine === null
+            ? Math.min(preferred.length > 0 ? 0 : 1, cap)
+            : Math.max(cap - preferred.length, 0);
     const picked = [...preferred, ...rest.slice(0, pickCount)];
 
     const items = picked.map(p => ({
@@ -163,63 +171,100 @@ const selectForLine = (
 
     // Line-level attractiveness for the cross-line budget split below — sum rather than average,
     // so a line with more good real inventory earns a bigger share, not just a higher per-item one.
-    const lineScore = items.reduce((sum, i) => sum + i.score, 0);
+    const lineScore = scored.slice(0, Math.min(cap, LINE_SCORE_DEPTH)).reduce((sum, i) => sum + i.score, 0);
 
-    return { line, items, reserves: rest.slice(pickCount), lineScore };
+    return { line, items, reserves: rest.slice(pickCount), lineScore,
+        maxItems: cap,
+        budgetSized: input.plannerSettings.maxRecommendationsPerLine === null,
+        maxAvails,
+        minCpm,
+    };
 };
 
 /**
  * No plan can realistically buy all of a property's avails, so the more of it a plan has
  * already bought, the smaller the share of each further rupee it gets — the rest flows to
- * less-bought items. Buying up to 10% of a property is ideal (flat full weight, and spillover
- * only starts once every pick is past it), 10–30% is increasingly discouraged, and past 30%
- * the property takes nothing more at all.
+ * less-bought items. Each item has its own target buy % (targetFill, from how well it matches
+ * — see planner.candidates.ts's scoreMatches): full weight up to it, then tapering steps, and
+ * nothing past twice the target or MAX_FILL, whichever is lower.
  */
-export const FILL_TIERS = [
-    { upToFill: 0.1, weight: 1 },
-    { upToFill: 0.15, weight: 0.4 },
-    { upToFill: 0.2, weight: 0.2 },
-    { upToFill: 0.25, weight: 0.1 },
-    { upToFill: 0.3, weight: 0.05 },
+const FILL_TAPER = [
+    { upToTarget: 1, weight: 1 },
+    { upToTarget: 1.25, weight: 0.4 },
+    { upToTarget: 1.5, weight: 0.2 },
+    { upToTarget: 2, weight: 0.05 },
 ] as const;
-export const MAX_FILL = FILL_TIERS[FILL_TIERS.length - 1].upToFill;
+export const MAX_FILL = 0.3;
 
-/** The most a plan can ever spend on one item: MAX_FILL of its avails at its (client) CPM. */
-export const maxSpendFor = (c: CandidateInventoryItem): number => (c.avails * MAX_FILL * c.cpm) / 1000;
+/** The most of one item's avails a plan may buy. */
+export const maxFillFor = (c: CandidateInventoryItem): number =>
+    Math.min(MAX_FILL, c.targetFill * FILL_TAPER[FILL_TAPER.length - 1].upToTarget);
+
+/** The most a plan can ever spend on one item: maxFillFor of its avails at its (client) CPM. */
+export const maxSpendFor = (c: CandidateInventoryItem): number => (c.avails * maxFillFor(c) * c.cpm) / 1000;
 
 /** Below a rupee of room left, an item counts as full — keeps pourIntoLine from looping on dust. */
 const MIN_ROOM = 1;
 
-const fillWeight = (p: Placement): number => {
-    if (maxSpendFor(p.candidate) - p.spent < MIN_ROOM) return 0;
+/**
+ * Budget is poured in two passes: 'target' fills every item only up to its target buy %
+ * (widening lines and moving leftover to other lines first), 'cap' then lets items past their
+ * targets, tapering, only for money nothing else had room for — so going over target is a
+ * last resort, not a side effect of one line's share being bigger than its inventory.
+ */
+type PourPass = 'target' | 'cap';
+
+const spendCeiling = (c: CandidateInventoryItem, pass: PourPass): number =>
+    pass === 'target' ? (c.avails * Math.min(c.targetFill, MAX_FILL) * c.cpm) / 1000 : maxSpendFor(c);
+
+const fillWeight = (p: Placement, pass: PourPass): number => {
+    if (spendCeiling(p.candidate, pass) - p.spent < MIN_ROOM) return 0;
     const fill = (p.spent * 1000) / p.candidate.cpm / p.candidate.avails;
-    return FILL_TIERS.find(t => fill < t.upToFill)?.weight ?? 0;
+    return FILL_TAPER.find(t => fill < p.candidate.targetFill * t.upToTarget)?.weight ?? 0;
 };
 
 /** Money is poured in this many slices so fill tiers re-weight as items fill, rather than once up front. */
 const POUR_STEPS = 100;
 
 /**
- * Pours money into one line's items, each slice split by base weight × fill-tier weight —
- * "broad" gives every item the same base weight, otherwise it's the item's score, so the top
- * pick still gets more than the last. Once no item is in its full-weight tier any more, the
- * next-ranked reserve joins as 'spillover' at full weight and takes most of what follows —
- * so a line widens past its normal pick count only when its picks are genuinely filling up.
- * Returns whatever couldn't be placed because the whole line ran out.
+ * Pours money into one line's items, each slice split by base weight × fill weight — "broad"
+ * gives every item the same base weight, otherwise it's the item's score, so the top pick still
+ * gets more than the last. Once no item is below its target buy % any more, the next-ranked
+ * reserve joins at full weight and takes most of what follows — so a line only widens when its
+ * items are genuinely full: a small budget stays on a few items, small items pull in more.
+ * Joiners get a real role up to the line's item count, 'spillover' past it. Returns whatever
+ * couldn't be placed because the whole line ran out.
  */
 const pourIntoLine = (
     selection: LineSelection,
     money: number,
-    diversification: PlannerInput['plannerSettings']['diversification']
+    diversification: PlannerInput['plannerSettings']['diversification'],
+    pass: PourPass
 ): number => {
+    const joinNext = () => {
+        const next = selection.reserves.shift()!;
+        const role =
+            selection.items.length < selection.maxItems
+                ? assignRole(next.candidate, selection.maxAvails, selection.minCpm)
+                : 'spillover';
+        selection.items.push({ ...next, role, spent: 0 });
+    };
+    if (selection.budgetSized) {
+        const start = Math.min(
+            Math.max(1, Math.floor(money / SPEND_PER_STARTING_ITEM)),
+            BUDGET_SIZED_START_ITEMS,
+            selection.maxItems
+        );
+        while (selection.items.length < start && selection.reserves.length > 0) joinNext();
+    }
+
     const slice = money / POUR_STEPS;
     let remaining = money;
     while (remaining >= MIN_ROOM) {
-        let weights = selection.items.map(fillWeight);
+        let weights = selection.items.map(p => fillWeight(p, pass));
         if (!weights.includes(1) && selection.reserves.length > 0) {
-            const next = selection.reserves.shift()!;
-            selection.items.push({ ...next, role: 'spillover', spent: 0 });
-            weights = selection.items.map(fillWeight);
+            joinNext();
+            weights = selection.items.map(p => fillWeight(p, pass));
         }
         // Score can legitimately be 0 (every signal normalized to 0) — floor it so a full-weight
         // item still takes money rather than stalling the pour.
@@ -232,7 +277,7 @@ const pourIntoLine = (
         const pour = Math.min(remaining, slice);
         selection.items.forEach((p, i) => {
             if (effective[i] === 0) return;
-            const take = Math.min((pour * effective[i]) / total, maxSpendFor(p.candidate) - p.spent);
+            const take = Math.min((pour * effective[i]) / total, spendCeiling(p.candidate, pass) - p.spent);
             p.spent += take;
             remaining -= take;
         });
@@ -369,19 +414,22 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
 
     // Each line gets its score-weighted share first; whatever a line can't place (its whole pool
     // filled up) is re-poured across the lines that still have room, by the same weights, until
-    // it's all placed or every line is full — what's left then is reported as unspent.
+    // it's all placed or every line is full — first up to every item's target buy %, then (only
+    // for what's still left) past it towards the caps. What's left after both is unspent.
     const lineShare = (open: LineSelection[], s: LineSelection): number => {
         const total = open.reduce((sum, o) => sum + o.lineScore, 0);
         return total > 0 ? s.lineScore / total : 1 / open.length;
     };
     const diversification = input.plannerSettings.diversification;
-    let open = selections;
     let unplaced = budget;
-    while (unplaced >= MIN_ROOM && open.length > 0) {
-        const round = unplaced;
-        const leftovers = open.map(s => pourIntoLine(s, round * lineShare(open, s), diversification));
-        unplaced = leftovers.reduce((sum, l) => sum + l, 0);
-        open = open.filter((_, i) => leftovers[i] === 0);
+    for (const pass of ['target', 'cap'] as const) {
+        let open = selections;
+        while (unplaced >= MIN_ROOM && open.length > 0) {
+            const round = unplaced;
+            const leftovers = open.map(s => pourIntoLine(s, round * lineShare(open, s), diversification, pass));
+            unplaced = leftovers.reduce((sum, l) => sum + l, 0);
+            open = open.filter((_, i) => leftovers[i] === 0);
+        }
     }
     const unspentBudget = Math.round(Math.max(unplaced, 0));
 
@@ -402,6 +450,8 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
                 avails: item.candidate.avails,
                 uniqueAudience: item.candidate.uniqueAudience,
                 targetingFactor: item.candidate.targetingFactor,
+                matchScore: item.candidate.matchScore,
+                buyPercent: Math.round((impressions / item.candidate.avails) * 1000) / 10,
                 cpm: item.candidate.cpm,
                 vcr: item.candidate.vcr,
                 amount: Math.round(amount),
@@ -479,6 +529,7 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
         kpiFit,
         deliveryFit,
         cpmFit,
+        inventoryWarnings: candidates.inventoryWarnings,
         buying: {
             dealType: input.buying.dealType,
             dspCompatible: input.buying.dspChoice !== null,

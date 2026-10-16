@@ -103,3 +103,48 @@ export const generateStructured = async <S extends z.ZodTypeAny>(params: {
 
     return parsed.data;
 };
+
+/** Titan Text Embeddings v2 — what scripts/ingest-inventory.js --embeddings stored inventory_embeddings with; a query must use the same model and size to be comparable. */
+export const EMBEDDING_MODEL_ID = 'amazon.titan-embed-text-v2:0';
+export const EMBEDDING_DIMENSIONS = 256;
+/** Titan v2 takes up to 8k tokens; a brief longer than this many characters is cut, not rejected. */
+const MAX_EMBEDDING_CHARS = 20000;
+
+/**
+ * A normalized embedding of `text`, or null when it can't be had (no Bedrock API key — the
+ * Anthropic client's SigV4 fallback doesn't cover a raw model call — or the call failed).
+ * Callers treat null as "no semantic signal", never as an error: the plan still generates.
+ */
+export const embedText = async (text: string): Promise<Float32Array | null> => {
+    if (!config.bedrock.apiKey || text.trim() === '') return null;
+    try {
+        const response = await fetch(
+            `https://bedrock-runtime.${config.bedrock.region}.amazonaws.com/model/${encodeURIComponent(EMBEDDING_MODEL_ID)}/invoke`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.bedrock.apiKey}` },
+                body: JSON.stringify({
+                    inputText: text.slice(0, MAX_EMBEDDING_CHARS),
+                    dimensions: EMBEDDING_DIMENSIONS,
+                    normalize: true,
+                }),
+            }
+        );
+        if (!response.ok) {
+            logger.warn('Bedrock embedding call failed', { status: response.status, body: await response.text() });
+            return null;
+        }
+        const body = (await response.json()) as { embedding: number[] };
+        return Float32Array.from(body.embedding);
+    } catch (error) {
+        logger.warn('Bedrock embedding call failed', { error: (error as Error).message });
+        return null;
+    }
+};
+
+/** Cosine similarity of two normalized vectors (a plain dot product). */
+export const cosine = (a: Float32Array, b: Float32Array): number => {
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) sum += a[i] * b[i];
+    return sum;
+};

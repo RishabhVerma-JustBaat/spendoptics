@@ -6,6 +6,12 @@
  * foreign keys pointing at them.
  *
  * Usage: node scripts/ingest-inventory.js <Packages.xlsx> <RoughUploadingData.xlsx> <MasterSheet.xlsx> [WebsiteDemographics.xlsx]
+ *        node scripts/ingest-inventory.js --embeddings
+ *
+ * --embeddings fills inventory_embeddings (one Titan v2 embedding per distinct inventory name,
+ * for the planner's semantic match score and alternative suggestions). Only names not stored
+ * yet are embedded, so re-running it after a sheet update costs only the new names. Run it after
+ * every inventory ingest; the API caches embeddings per process, so restart it afterwards.
  */
 require('dotenv').config();
 const XLSX = require('xlsx');
@@ -244,7 +250,98 @@ async function ingestMobileInApp(workbook) {
     console.log(`inventory_mobile_inapp: ${data.length} rows`);
 }
 
+// Must match src/services/bedrock.service.ts (EMBEDDING_MODEL_ID / EMBEDDING_DIMENSIONS) and
+// planner.candidates.ts's embeddingKey, or stored vectors won't line up with query vectors.
+const EMBEDDING_MODEL_ID = 'amazon.titan-embed-text-v2:0';
+const EMBEDDING_DIMENSIONS = 256;
+const embeddingKey = name => name.trim().toLowerCase();
+const EMBED_CONCURRENCY = 8;
+
+const embed = async text => {
+    const region = process.env.AWS_REGION || 'us-east-1';
+    for (let attempt = 0; ; attempt++) {
+        const response = await fetch(
+            `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(EMBEDDING_MODEL_ID)}/invoke`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.BEDROCK_API_KEY}` },
+                body: JSON.stringify({ inputText: text, dimensions: EMBEDDING_DIMENSIONS, normalize: true }),
+            }
+        );
+        if (response.ok) return (await response.json()).embedding;
+        // Throttled: back off and retry; anything else is a real failure.
+        if (response.status === 429 && attempt < 6) {
+            await new Promise(r => setTimeout(r, 1000 * 2 ** attempt));
+            continue;
+        }
+        throw new Error(`Embedding failed (${response.status}): ${await response.text()}`);
+    }
+};
+
+async function ingestEmbeddings() {
+    if (!process.env.BEDROCK_API_KEY) throw new Error('BEDROCK_API_KEY is required for --embeddings');
+
+    // Same line mapping as planner.candidates.ts's fetchers; websites also carry their IAB
+    // categories, which give a bare domain name something to embed against.
+    const rows = await prisma.$queryRawUnsafe(
+        `SELECT DISTINCT application_name AS name,
+                CASE WHEN type = 'OEM' THEN 'ctv-fast' ELSE 'ctv-ott' END AS line, NULL::text AS category
+           FROM inventory_ctv
+         UNION SELECT DISTINCT app_name, 'mobile-ott', NULL FROM inventory_mobile_ott
+         UNION SELECT DISTINCT inventory_name, 'websites', unnest(iab_categories) FROM inventory_websites
+         UNION SELECT DISTINCT app_name, 'in-app', NULL FROM inventory_mobile_inapp`
+    );
+    const byKey = new Map();
+    for (const r of rows) {
+        const key = embeddingKey(r.name);
+        if (!key) continue;
+        const entry = byKey.get(key) ?? { name: key, display: r.name.trim(), lines: new Set(), categories: new Set() };
+        entry.lines.add(r.line);
+        if (r.category) entry.categories.add(r.category);
+        byKey.set(key, entry);
+    }
+
+    const stored = new Set((await prisma.inventoryEmbedding.findMany({ select: { name: true } })).map(r => r.name));
+    const todo = [...byKey.values()].filter(e => !stored.has(e.name));
+    console.log(`${byKey.size} distinct names, ${stored.size} already embedded, ${todo.length} to embed`);
+
+    let done = 0;
+    const pending = [];
+    const flush = async () => {
+        if (pending.length === 0) return;
+        await prisma.inventoryEmbedding.createMany({ data: pending.splice(0), skipDuplicates: true });
+    };
+    for (let i = 0; i < todo.length; i += EMBED_CONCURRENCY) {
+        const batch = todo.slice(i, i + EMBED_CONCURRENCY);
+        const vectors = await Promise.all(
+            batch.map(e => {
+                const text = e.categories.size > 0 ? `${e.display} — ${[...e.categories].join(', ')}` : e.display;
+                e.text = text;
+                return embed(text);
+            })
+        );
+        batch.forEach((e, j) =>
+            pending.push({
+                name: e.name,
+                lines: [...e.lines],
+                text: e.text,
+                vector: Buffer.from(new Float32Array(vectors[j]).buffer),
+            })
+        );
+        done += batch.length;
+        if (pending.length >= 500) await flush();
+        if (done % 1000 < EMBED_CONCURRENCY) console.log(`  ${done}/${todo.length}`);
+    }
+    await flush();
+    console.log(`inventory_embeddings: ${done} added`);
+}
+
 async function main() {
+    if (process.argv[2] === '--embeddings') {
+        await ingestEmbeddings();
+        await prisma.$disconnect();
+        return;
+    }
     const [packagesPath, roughDataPath, masterSheetPath, websiteDemographicsPath] = process.argv.slice(2);
     if (!packagesPath || !roughDataPath || !masterSheetPath) {
         console.error(

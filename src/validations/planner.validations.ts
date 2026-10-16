@@ -42,6 +42,9 @@ export const suggestPromptSchema = Joi.object({
 export const savePlanSchema = Joi.object({
     input: Joi.object().unknown(true).required(),
     plan: Joi.object().unknown(true).required(),
+    // The prompt this plan was built from — stored as the plan's brief and used by refine as the
+    // "earlier prompt". Falls back to input.rawPrompt when not sent.
+    prompt: Joi.string().trim().max(20000).allow(null).empty('').default(null),
 });
 
 // Every nullable field also carries .empty('') — caught live: the suggest call (Call 1) can
@@ -119,6 +122,7 @@ export const generatePlanSchema = Joi.object({
             .items(Joi.string().valid(...MEDIA_TYPES))
             .default([]),
         iabCategories: stringArray,
+        keywords: stringArray,
         qualityTier: Joi.string()
             .valid(...QUALITY_TIERS)
             .allow(null).empty('')
@@ -188,17 +192,16 @@ export const generatePlanSchema = Joi.object({
         diversification: Joi.string()
             .valid(...DIVERSIFICATIONS)
             .default('balanced'),
-        maxRecommendationsPerLine: Joi.number().integer().min(1).max(50).default(8),
+        maxRecommendationsPerLine: Joi.number().integer().min(1).max(50).allow(null).default(null),
     }).default(),
 });
 
 // `input` is the full current form, re-validated like generate's (it may carry fresh manual
-// edits). `prompt` is only sent when the prompt text itself was edited. `previousPlan` is the
-// output being refined, round-tripped as loosely as savePlanSchema's `plan`.
+// edits). `prompt` is only sent when the prompt text itself was edited. The earlier prompt and
+// plan are read from the saved plan at :planId, so neither is sent.
 export const refinePlanSchema = Joi.object({
     input: generatePlanSchema.required(),
     prompt: Joi.string().trim().max(20000).allow(null).empty('').default(null),
-    previousPlan: Joi.object().unknown(true).required(),
 });
 
 // ============================================================================

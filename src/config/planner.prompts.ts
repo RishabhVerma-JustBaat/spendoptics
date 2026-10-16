@@ -16,6 +16,7 @@ import {
     GeneratedPlan,
     BestDates,
     GeneratedPlanCore,
+    InputWarning,
     KPI_METRICS,
     MEDIA_TYPES,
     OBJECTIVES,
@@ -77,6 +78,7 @@ export const buildEmptyPlannerInput = (): PlannerInput => ({
         platforms: [],
         mediaTypes: [],
         iabCategories: [],
+        keywords: [],
         qualityTier: null,
         preferredSitesApps: [],
         blockedSitesApps: [],
@@ -105,7 +107,7 @@ export const buildEmptyPlannerInput = (): PlannerInput => ({
     plannerSettings: {
         optimiseFor: 'balanced',
         diversification: 'balanced',
-        maxRecommendationsPerLine: 8,
+        maxRecommendationsPerLine: null,
     },
 });
 
@@ -148,6 +150,7 @@ const FIELD_VALIDATORS: Record<string, (value: unknown) => boolean> = {
     'inventory.platforms': v => Array.isArray(v) && v.every(x => (PLATFORMS as readonly string[]).includes(x)),
     'inventory.mediaTypes': v => Array.isArray(v) && v.every(x => (MEDIA_TYPES as readonly string[]).includes(x)),
     'inventory.iabCategories': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
+    'inventory.keywords': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'inventory.qualityTier': v => (QUALITY_TIERS as readonly string[]).includes(v as string),
     'inventory.preferredSitesApps': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'inventory.blockedSitesApps': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
@@ -207,10 +210,10 @@ const buildSuggestSchema = () =>
 const FIELD_REFERENCE = `brand.name (text — ONLY if literally stated, never inferred/assumed), brand.category (text — your own inference from the brand, not a fixed list; leave out if the brand gives no real signal)
 campaign.objective (one of: ${OBJECTIVES.join(', ')}), campaign.kpis (list of {"metric":"vcr"|"ctr","target":number|null} — ONLY these 2 metrics, nothing else), campaign.budget (number, INR, no shorthand — "50 Lakh" -> 5000000, "1 Crore" -> 10000000 — NEVER leave this out, always give a real number even if assumed), campaign.startDate/campaign.endDate (YYYY-MM-DD), campaign.campaignMonth (YYYY-MM, only if exact dates aren't known), campaign.seasonality (text), campaign.pacing (one of: ${PACINGS.join(', ')}), campaign.regionalTargets (list of {"region":text,"impressions":number} — see the table-parsing rule below)
 audience.country (text — the real-world country this ask is for, e.g. "India", "USA" — NEVER leave this out; default "India" unless the brief clearly names somewhere else), audience.geoScope (one of: ${GEO_SCOPES.join(', ')}), audience.states (text list, only used when geoScope is "states"), audience.excludeStates (text list — ONLY if literally stated, never inferred/assumed), audience.gender (one of: ${GENDERS.join(', ')} — NEVER leave this out), audience.ageGroups (list from: ${AGE_GROUPS.join(', ')} — NEVER leave this out), audience.incomeGroups (list from: ${INCOME_GROUPS.join(', ')} — monthly household income: premium ₹1,00,000+, upper-middle ₹60,000-99,999, middle ₹30,000-59,999, lower-middle ₹15,000-29,999, value under ₹15,000; see the conditional rule below)
-inventory.platforms (list from: ${PLATFORMS.join(', ')} — "ctv-oem"/"ctv-fast" both mean ad-supported FAST channels like Samsung TV Plus/TCL Channel; "ctv-ott" means on-demand CTV apps like JioHotstar/ZEE5/MX Player; plain "ctv" means both), inventory.mediaTypes (list from: ${MEDIA_TYPES.join(', ')}), inventory.iabCategories (text list, only real categories, see rule below), inventory.qualityTier (one of: ${QUALITY_TIERS.join(', ')}), inventory.preferredSitesApps/blockedSitesApps (text lists — ONLY if literally stated, never inferred/assumed), inventory.minViewabilityPct/minVcrPct (0-100), inventory.maxCpm (INR, a single overall cap — only use this when one CPM applies to everything), inventory.minAvails/minUniqueAudience (numbers), inventory.channelCpmTargets (list of {"platform":one of the platform values above,"maxCpm":number} — use this instead of maxCpm whenever different platforms are asked about at different rates, e.g. "₹130 for OTT-CTV, ₹100 for FAST")
+inventory.platforms (list from: ${PLATFORMS.join(', ')} — "ctv-oem"/"ctv-fast" both mean ad-supported FAST channels like Samsung TV Plus/TCL Channel; "ctv-ott" means on-demand CTV apps like JioHotstar/ZEE5/MX Player; plain "ctv" means both), inventory.mediaTypes (list from: ${MEDIA_TYPES.join(', ')}), inventory.iabCategories (text list, only real categories, see rule below), inventory.keywords (text list of 5-12 short topical keywords for the content and audience this brand fits, used to match inventory by meaning — e.g. a beauty brand: "beauty", "skincare", "makeup", "cosmetics", "women's lifestyle"; an IPL sponsor: "cricket", "IPL", "sports", "live sports streaming" — inferred from the brand, category and brief, never left out), inventory.qualityTier (one of: ${QUALITY_TIERS.join(', ')}), inventory.preferredSitesApps/blockedSitesApps (text lists — ONLY if literally stated, never inferred/assumed), inventory.minViewabilityPct/minVcrPct (0-100), inventory.maxCpm (INR, a single overall cap — only use this when one CPM applies to everything), inventory.minAvails/minUniqueAudience (numbers), inventory.channelCpmTargets (list of {"platform":one of the platform values above,"maxCpm":number} — use this instead of maxCpm whenever different platforms are asked about at different rates, e.g. "₹130 for OTT-CTV, ₹100 for FAST")
 creative.displayFormats/displaySizes (text lists), creative.videoPlacements (list from: ${VIDEO_PLACEMENTS.join(', ')}), creative.videoDurations (list from: ${VIDEO_DURATIONS.join(', ')}), creative.skippability (list from: ${SKIPPABILITY.join(', ')})
 buying.dspChoice (one of: ${DSP_CHOICES.join(', ')} — ONLY if literally stated, never inferred/assumed), buying.spendoptixDspRoute (one of: ${SPENDOPTIX_DSP_ROUTES.join(', ')}, only if dspChoice is spendoptix-dsp), buying.ownDspNames (text list, only if dspChoice is own-dsp), buying.seatId (text), buying.dealType (one of: ${DEAL_TYPES.join(', ')}), buying.frequencyCap ({"impressions":number,"period":"${FREQUENCY_CAP_PERIODS.join('"|"')}"})
-plannerSettings.optimiseFor (one of: ${OPTIMISE_FOR.join(', ')}, default balanced), plannerSettings.diversification (one of: ${DIVERSIFICATIONS.join(', ')}, default balanced), plannerSettings.maxRecommendationsPerLine (number, default 8)`;
+plannerSettings.optimiseFor (one of: ${OPTIMISE_FOR.join(', ')}, default balanced), plannerSettings.diversification (one of: ${DIVERSIFICATIONS.join(', ')}, default balanced), plannerSettings.maxRecommendationsPerLine (number of properties per channel — ONLY when the brief states a count; otherwise the engine sizes it from the budget)`;
 
 const buildSuggestSystemPrompt = (iabCategories: string[]): string =>
     `First decide "isMediaBrief": true when the text is in any way a request to plan, price, or check advertising (a campaign, a brand, a budget, channels/platforms, an audience, or asking whether specific inventory/publishers are available) — be generous, a two-line casual ask or a bare "CTV campaign for 10 lakh" counts. false only when it clearly isn't one: keyboard mash or unintelligible text, or an unrelated request (a poem, code, general questions, chit-chat). When false, set "notABriefReason" to one short sentence for the planner saying why (e.g. "This reads as a general knowledge question, not an advertising brief.") and leave "suggestions" empty; when true, set it to null.
@@ -224,7 +227,7 @@ For EVERY field, decide one of three provenance tags:
 
 Never skip a field because nothing was said — tag it "assumed" and give your best reasonable default instead. Three fields are conditional exceptions: "audience.incomeGroups" (only when the brief signals income or affluence, e.g. "affluent", "HNI", "SEC A", "budget-conscious" — leave it out otherwise, since an assumed income band raises the plan's price), "inventory.iabCategories" (only suggest one of these real categories: ${iabCategories.join(', ')} — leave it unsuggested if genuinely nothing fits, since inventing one that doesn't exist in the real data defeats its purpose) and "brand.category" (leave it out if the brand name gives no real signal at all — an unfamiliar or ambiguous name shouldn't get a guessed category).
 
-A separate set of fields works the other way around — they may ONLY ever be tagged "stated", never "inferred" or "assumed": brand.name, buying.dspChoice (and its dependents spendoptixDspRoute/ownDspNames), audience.excludeStates, inventory.preferredSitesApps, inventory.blockedSitesApps. If the brief doesn't literally name one of these, leave the field out entirely — a guessed brand name, DSP preference, excluded state, or preferred/blocked property is worse than an honestly blank field here. These five fields (plus the three conditional ones above) are the ONLY fields ever allowed to be left out — every other field below, including ones with no obvious signal (e.g. campaign.startDate, campaign.pacing, audience.geoScope), must still get a real "assumed" value per the main rule; never apply this "leave it out" treatment to a field that isn't explicitly named in this paragraph or the one above it.
+A separate set of fields works the other way around — they may ONLY ever be tagged "stated", never "inferred" or "assumed": brand.name, buying.dspChoice (and its dependents spendoptixDspRoute/ownDspNames), audience.excludeStates, inventory.preferredSitesApps, inventory.blockedSitesApps, plannerSettings.maxRecommendationsPerLine. If the brief doesn't literally name one of these, leave the field out entirely — a guessed brand name, DSP preference, excluded state, or preferred/blocked property is worse than an honestly blank field here. These six fields (plus the three conditional ones above) are the ONLY fields ever allowed to be left out — every other field below, including ones with no obvious signal (e.g. campaign.startDate, campaign.pacing, audience.geoScope), must still get a real "assumed" value per the main rule; never apply this "leave it out" treatment to a field that isn't explicitly named in this paragraph or the one above it.
 
 "brand.name" specifically means the ADVERTISER running this campaign — never a publisher, app, channel, or property the brief is asking *about*. A brief that asks "do you have inventory on X and Y" or "what are your rates for X" is asking about X and Y as properties, not naming an advertiser at all — in that case leave brand.name out entirely and put X and Y into inventory.preferredSitesApps instead (tagged "stated"), since that's what the brief is actually naming. Only use brand.name when the brief identifies whose campaign this is, distinct from any property/publisher it also mentions.
 
@@ -282,7 +285,7 @@ export interface SuggestResult {
     input: PlannerInput;
     provenance: Record<string, Provenance>;
     /** Values the model extracted that can't be right (past dates, a VCR over 100%, a made-up state, ...) — dropped from input, listed here for the planner. See planner.validations.ts. */
-    warnings: { field: string; message: string }[];
+    warnings: InputWarning[];
 }
 
 /**
@@ -427,7 +430,7 @@ Your only job: compare the earlier brief with the new brief, work out what the p
 
 Where the current form disagrees with the earlier brief (e.g. the brief says "25-34" but the form has two age groups), the planner edited that field by hand on purpose — never change it back to match the brief unless the NEW wording explicitly talks about that field. When the new wording changes one entry of a list (e.g. one KPI target), keep every other entry exactly as it is in the current form.
 
-The new brief may be a full rewritten brief or just a short instruction about the existing plan (e.g. "drop YouTube", "push more budget to CTV", "remove JioHotstar", "make it 50 Lakh") — handle both. Map instructions about the existing plan onto form fields, since the plan itself is always regenerated from the form: removing a property -> inventory.blockedSitesApps (keep its existing entries and add to them), favouring a property -> inventory.preferredSitesApps, dropping/adding a channel -> inventory.platforms (always remove a dropped channel from inventory.platforms when it's listed there, even if the previous plan shows no budget line for it — the plan summary only lists channels that got budget, not everything the form asks for), wanting cheaper/more reach/better quality -> plannerSettings.optimiseFor or inventory.qualityTier, fewer/more properties -> plannerSettings.diversification or maxRecommendationsPerLine.
+The new brief may be a full rewritten brief or just a short instruction about the existing plan (e.g. "drop YouTube", "push more budget to CTV", "remove JioHotstar", "make it 50 Lakh") — handle both. Map instructions about the existing plan onto form fields, since the plan itself is always regenerated from the form: removing a property -> inventory.blockedSitesApps (keep its existing entries and add to them), favouring a property -> inventory.preferredSitesApps, dropping/adding a channel -> inventory.platforms (always remove a dropped channel from inventory.platforms when it's listed there, even if the previous plan shows no budget line for it — the plan summary only lists channels that got budget, not everything the form asks for), wanting cheaper/more reach/better quality -> plannerSettings.optimiseFor or inventory.qualityTier, fewer/more properties -> plannerSettings.maxRecommendationsPerLine (a number relative to the per-channel counts in the plan summary, e.g. "add more inventory" on a plan with 6 items per channel -> 9, "fewer sites" -> 4; clear it to go back to sizing by budget), increase/decrease the CPM -> inventory.maxCpm relative to the plan's average CPM in the summary (e.g. "reduce CPM by 10%" on ₹200 -> 180; "allow premium/pricier inventory" raises or clears it), add a property -> inventory.preferredSitesApps, remove a property -> inventory.blockedSitesApps, increase/decrease the budget -> campaign.budget (relative to the current budget when the edit is relative, e.g. "+20%").
 
 For list fields, output the complete new list (existing entries that should stay, plus additions, minus removals) — never only the delta. To clear a field back to unset (e.g. "remove the CPM cap"), set "clear" to true.
 
@@ -449,10 +452,18 @@ To clear a field, set "clear" true and leave every slot null.`;
 const summarisePreviousPlan = (plan: Partial<GeneratedPlan>): string => {
     const lines = Array.isArray(plan.budgetAllocation) ? plan.budgetAllocation : [];
     if (lines.length === 0) return '(no previous plan details given)';
-    return lines
+    const avgCpm = plan.keyFigures?.averageCpm;
+    const header = [
+        avgCpm ? `Average CPM: ₹${avgCpm}` : '',
+        plan.keyFigures ? `Impressions: ${plan.keyFigures.estimatedImpressions}, reach: ${plan.keyFigures.estimatedReach}` : '',
+    ]
+        .filter(Boolean)
+        .map(l => l + '\n')
+        .join('');
+    return header + lines
         .map(
             line =>
-                `- ${line.inventoryLine}: ${line.sharePercent}% share, ₹${line.amount} — ` +
+                `- ${line.inventoryLine}: ${line.sharePercent}% share, ₹${line.amount}, ${Array.isArray(line.recommendedInventory) ? line.recommendedInventory.length : 0} items — ` +
                 (Array.isArray(line.recommendedInventory)
                     ? line.recommendedInventory.map(item => item.name).join(', ')
                     : '')
@@ -478,7 +489,7 @@ export const generateRefinement = async (
     newPrompt: string,
     previousPlan: Partial<GeneratedPlan>,
     iabCategories: string[]
-): Promise<{ input: PlannerInput; changes: RefineFieldChange[]; warnings: { field: string; message: string }[] }> => {
+): Promise<{ input: PlannerInput; changes: RefineFieldChange[]; warnings: InputWarning[] }> => {
     const { rawPrompt: _rawPrompt, ...form } = input;
     // The common case is text appended to the earlier brief. Working out that difference is
     // mechanical, so do it here — verified live that when left to compare the two full briefs
@@ -893,6 +904,7 @@ export const mergePlan = (
         kpiFit: core.kpiFit,
         deliveryFit: core.deliveryFit,
         cpmFit: core.cpmFit,
+        inventoryWarnings: core.inventoryWarnings,
         assumptions: narration.assumptions,
     },
     // core.internal (media cost/commission) is deliberately left out — this response reaches

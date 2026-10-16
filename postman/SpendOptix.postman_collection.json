@@ -5,13 +5,28 @@
         "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
     },
     "variable": [
-        { "key": "baseUrl", "value": "https://onespend.worldnewscorp.com" },
-        { "key": "authToken", "value": "z9jaH0nG24PyfcvtdwsWnhpm7Ve9aRCc" },
-        { "key": "planId", "value": "" }
+        {
+            "key": "baseUrl",
+            "value": "https://onespend.worldnewscorp.com"
+        },
+        {
+            "key": "authToken",
+            "value": "z9jaH0nG24PyfcvtdwsWnhpm7Ve9aRCc"
+        },
+        {
+            "key": "planId",
+            "value": ""
+        }
     ],
     "auth": {
         "type": "bearer",
-        "bearer": [{ "key": "token", "value": "{{authToken}}", "type": "string" }]
+        "bearer": [
+            {
+                "key": "token",
+                "value": "{{authToken}}",
+                "type": "string"
+            }
+        ]
     },
     "item": [
         {
@@ -22,7 +37,9 @@
                     "request": {
                         "method": "GET",
                         "url": "{{baseUrl}}/health",
-                        "auth": { "type": "noauth" }
+                        "auth": {
+                            "type": "noauth"
+                        }
                     }
                 }
             ]
@@ -35,12 +52,21 @@
                     "request": {
                         "method": "POST",
                         "url": "{{baseUrl}}/api/v1/planner/suggestions",
-                        "header": [{ "key": "Content-Type", "value": "application/json" }],
-                        "description": "Free text in, a fully pre-filled form out (every field, never blank) plus a provenance tag per field: \"stated\" (literally in the prompt), \"inferred\" (worked out from context), or \"assumed\" (no signal at all, a plausible default). The response's \"data.input\" is exactly what you'd send to Generate below, after the user reviews/edits it.\n\nJunk is rejected with 422 and a reason: text too short or mostly symbols (checked in code, no LLM call), or text the model judges is not an advertising brief (e.g. a poem, a general question). \"warnings\" lists values extracted from the brief that cannot be right (invalid or past dates, end before start, a KPI target over 100%, a non-Indian state, an IAB category not in the data, an unrealistic budget/CPM/frequency cap). They are removed from \"input\" so the planner can fill them in.",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "description": "Free text in, a fully pre-filled form out (every field, never blank) plus a provenance tag per field: \"stated\" (literally in the prompt), \"inferred\" (worked out from context), or \"assumed\" (no signal at all, a plausible default). The response's \"data.input\" is exactly what you'd send to Generate below, after the user reviews/edits it.\n\nJunk is rejected with 422 and a reason: text too short or mostly symbols (checked in code, no LLM call), or text the model judges is not an advertising brief (e.g. a poem, a general question). \"warnings\" lists values extracted from the brief that cannot be right (invalid or past dates, end before start, a KPI target over 100%, a non-Indian state, an IAB category not in the data, an unrealistic budget/CPM/frequency cap). They are removed from \"input\" so the planner can fill them in. Named properties not in the inventory are removed from preferredSitesApps / blockedSitesApps and listed in \"warnings\" with \"alternatives\" (the 5 closest real properties).",
                         "body": {
                             "mode": "raw",
                             "raw": "{\n  \"prompt\": \"We want to run a reach campaign for Nyka, targeting women 25-34 interested in beauty, around 50 Lakh budget, premium CTV and OTT inventory, PAN India.\"\n}",
-                            "options": { "raw": { "language": "json" } }
+                            "options": {
+                                "raw": {
+                                    "language": "json"
+                                }
+                            }
                         }
                     }
                 }
@@ -54,12 +80,21 @@
                     "request": {
                         "method": "POST",
                         "url": "{{baseUrl}}/api/v1/planner/generate",
-                        "header": [{ "key": "Content-Type", "value": "application/json" }],
-                        "description": "Every field is optional (sensible defaults apply) — this is the full PlannerInput shape with everything filled in as an example. Nothing is persisted by this call; it returns a GeneratedPlan (header, keyFigures, flight, pricing, bestDates, budgetCurve, cpmCurve, benefitSummary, budgetAllocation, plannedByTeam, audience, buying, brandSafety, checks). \"pricing\" lists the targeting uplifts already baked into every CPM, each a % of the base price, added not compounded: 1-4 states +10%; any demographic (age, gender, income) +10%; interest (iabCategories) + demographic together +15% instead. \"bestDates.source\" is \"viewership-calendar\" when the flight falls inside the loaded viewership calendar (scripts/ingest-calendar.js): windows are then picked and scored in code from each day's CTV/App/Web multiplier weighted by the plan's channel mix (score = share of possible windows beaten; each window also carries viewershipMultiplier and events). Otherwise it is \"ai-estimate\" and the AI judges the dates (viewershipMultiplier null). Each recommended item's avails/uniqueAudience are targetable figures, R = N × p1 × p2^0.5 × p3^0.25, where the p's are the item's shares in the selected age / gender / income bands sorted largest first (targetingFactor = R/N; 1 when nothing is targeted or the item has no demographic data). Save it afterward with \"Create a plan\" below if you want to keep it.\n\n\"rawPrompt\" carries the original free-text brief through from Suggestions (or set it directly if calling Generate without Suggestions first) — it's informational only, never parsed again here.\n\nAllowed enum values:\n- campaign.objective: awareness, reach, consideration, video-views, traffic, app-installs, leads, sales\n- campaign.kpis[].metric: vcr, ctr (only these two)\n- campaign.pacing: even, front-loaded, back-loaded, burst\n- audience.geoScope: pan-india, states (no \"cities\" anymore — states + optional excludeStates only)\n- audience.gender: all, male, female\n- audience.ageGroups: 18-24, 25-34, 35-44, 45-54, 55-64, 65+\n- audience.incomeGroups: premium, upper-middle, middle, lower-middle, value (monthly household income ₹1,00,000+ / ₹60,000-99,999 / ₹30,000-59,999 / ₹15,000-29,999 / under ₹15,000)\n- inventory.platforms: ctv, ctv-oem, ctv-fast, ctv-ott, mobile-ott, web, mweb, in-app, youtube\n- inventory.mediaTypes: display, video\n- inventory.qualityTier: premium-only, premium-preferred, any\n- inventory.iabCategories: must match one of the real categories in the ingested data (fetched live from the server — ask backend for the current list, e.g. \"Beauty & Fitness\", \"Finance\", \"News\", \"Shopping\", ...)\n- inventory.channelCpmTargets: [{platform, maxCpm}] — per-channel rate asks, e.g. different CPMs for ctv-fast vs ctv-ott\n- creative.videoPlacements: instream, outstream, interstitial\n- creative.videoDurations: under-10s, under-30s, up-to-60s\n- creative.skippability: skippable, non-skippable\n- buying.dspChoice: spendoptix-dsp, own-dsp\n- buying.spendoptixDspRoute: dv360, authorised-buyer\n- buying.dealType: pmp, programmatic-guaranteed, preferred-deal, open-auction, any\n- buying.frequencyCap.period: day, week, month, campaign\n- plannerSettings.optimiseFor: reach, cost-efficiency, quality, viewability, balanced\n- plannerSettings.diversification: concentrated, balanced, broad\n\nNote: brand.url, brand.competitors, audience.cities/affluenceSec/incomeBand (replaced by incomeGroups)/interests/behaviours/lifeStage/languages/audienceNotes, inventory.contentGenres/mustInclude/categoriesToAvoid/brandSafetyExclusions, and creative.videoPositions have all been removed from the form.\n\nInvalid values (same checks as the Suggestions warnings) are rejected with 422, listing every problem.",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "description": "Every field is optional (sensible defaults apply) — this is the full PlannerInput shape with everything filled in as an example. Nothing is persisted by this call; it returns a GeneratedPlan (header, keyFigures, flight, pricing, bestDates, budgetCurve, cpmCurve, benefitSummary, budgetAllocation, plannedByTeam, audience, buying, brandSafety, checks). \"pricing\" lists the targeting uplifts already baked into every CPM, each a % of the base price, added not compounded: 1-4 states +10%; any demographic (age, gender, income) +10%; interest (iabCategories) + demographic together +15% instead. \"bestDates.source\" is \"viewership-calendar\" when the flight falls inside the loaded viewership calendar (scripts/ingest-calendar.js): windows are then picked and scored in code from each day's CTV/App/Web multiplier weighted by the plan's channel mix (score = share of possible windows beaten; each window also carries viewershipMultiplier and events). Otherwise it is \"ai-estimate\" and the AI judges the dates (viewershipMultiplier null). Each recommended item's avails/uniqueAudience are targetable figures, R = N × p1 × p2^0.5 × p3^0.25, where the p's are the item's shares in the selected age / gender / income bands sorted largest first (targetingFactor = R/N; 1 when nothing is targeted or the item has no demographic data). Save it afterward with \"Create a plan\" below if you want to keep it.\n\n\"rawPrompt\" carries the original free-text brief through from Suggestions (or set it directly if calling Generate without Suggestions first) — it's informational only, never parsed again here.\n\nAllowed enum values:\n- campaign.objective: awareness, reach, consideration, video-views, traffic, app-installs, leads, sales\n- campaign.kpis[].metric: vcr, ctr (only these two)\n- campaign.pacing: even, front-loaded, back-loaded, burst\n- audience.geoScope: pan-india, states (no \"cities\" anymore — states + optional excludeStates only)\n- audience.gender: all, male, female\n- audience.ageGroups: 18-24, 25-34, 35-44, 45-54, 55-64, 65+\n- audience.incomeGroups: premium, upper-middle, middle, lower-middle, value (monthly household income ₹1,00,000+ / ₹60,000-99,999 / ₹30,000-59,999 / ₹15,000-29,999 / under ₹15,000)\n- inventory.platforms: ctv, ctv-oem, ctv-fast, ctv-ott, mobile-ott, web, mweb, in-app, youtube\n- inventory.mediaTypes: display, video\n- inventory.qualityTier: premium-only, premium-preferred, any\n- inventory.iabCategories: must match one of the real categories in the ingested data (fetched live from the server — ask backend for the current list, e.g. \"IAB18 Style & Fashion\", \"IAB17 Sports\", \"IAB12 News\", ... — anything else is rejected with 422)\n- inventory.keywords: free-text list of short topical keywords (e.g. beauty, skincare, makeup) — what the semantic match score compares inventory against; filled in by Suggestions\n- plannerSettings.maxRecommendationsPerLine: a number fixes the items per channel; null (default) sizes it from the budget\n- inventory.channelCpmTargets: [{platform, maxCpm}] — per-channel rate asks, e.g. different CPMs for ctv-fast vs ctv-ott\n- creative.videoPlacements: instream, outstream, interstitial\n- creative.videoDurations: under-10s, under-30s, up-to-60s\n- creative.skippability: skippable, non-skippable\n- buying.dspChoice: spendoptix-dsp, own-dsp\n- buying.spendoptixDspRoute: dv360, authorised-buyer\n- buying.dealType: pmp, programmatic-guaranteed, preferred-deal, open-auction, any\n- buying.frequencyCap.period: day, week, month, campaign\n- plannerSettings.optimiseFor: reach, cost-efficiency, quality, viewability, balanced\n- plannerSettings.diversification: concentrated, balanced, broad\n\nNote: brand.url, brand.competitors, audience.cities/affluenceSec/incomeBand (replaced by incomeGroups)/interests/behaviours/lifeStage/languages/audienceNotes, inventory.contentGenres/mustInclude/categoriesToAvoid/brandSafetyExclusions, and creative.videoPositions have all been removed from the form.\n\nInvalid values (same checks as the Suggestions warnings) are rejected with 422, listing every problem.\n\nEach recommended item carries matchScore (0-1: semantic closeness of the item to inventory.keywords and to the selected interests + audience, plus the IAB match; 1 for a named preferred property) and buyPercent (share of its targetable avails bought). Items aim at a buy % set by their match within the channel: most 3-12% (near 10%), the weakest matches under 3%, the strongest over 12%, never above 30%; budget first fills every item up to its target and only then goes past it. With maxRecommendationsPerLine null, a channel starts with one item per ₹50,000 of its budget (1-5) and adds more only as those reach their targets. checks.inventoryWarnings lists named properties (preferredSitesApps / blockedSitesApps) that are not in the inventory, each with the 5 closest real alternatives; they are left out of the plan.",
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"rawPrompt\": \"We want to run a reach campaign for Nyka, targeting women 25-34 interested in beauty, around 50 Lakh budget, premium CTV and OTT inventory, PAN India.\",\n  \"brand\": {\n    \"name\": \"Nyka\",\n    \"category\": \"Beauty & Personal Care\"\n  },\n  \"campaign\": {\n    \"objective\": \"reach\",\n    \"kpis\": [\n      { \"metric\": \"vcr\", \"target\": 65 },\n      { \"metric\": \"ctr\", \"target\": 2 }\n    ],\n    \"budget\": 5000000,\n    \"startDate\": \"2026-11-01\",\n    \"endDate\": \"2026-11-30\",\n    \"campaignMonth\": null,\n    \"seasonality\": \"Diwali\",\n    \"pacing\": \"even\",\n    \"regionalTargets\": []\n  },\n  \"audience\": {\n    \"geoScope\": \"pan-india\",\n    \"states\": [],\n    \"excludeStates\": [],\n    \"gender\": \"female\",\n    \"ageGroups\": [\"25-34\", \"35-44\"],\n    \"incomeGroups\": [\"premium\", \"upper-middle\"]\n  },\n  \"inventory\": {\n    \"platforms\": [\"ctv\", \"mobile-ott\", \"web\", \"in-app\"],\n    \"mediaTypes\": [\"display\", \"video\"],\n    \"iabCategories\": [\"Beauty & Fitness\"],\n    \"qualityTier\": \"premium-preferred\",\n    \"preferredSitesApps\": [],\n    \"blockedSitesApps\": [],\n    \"minViewabilityPct\": null,\n    \"minVcrPct\": null,\n    \"maxCpm\": 250,\n    \"minAvails\": null,\n    \"minUniqueAudience\": null,\n    \"channelCpmTargets\": []\n  },\n  \"creative\": {\n    \"displayFormats\": [],\n    \"displaySizes\": [],\n    \"videoPlacements\": [\"instream\"],\n    \"videoDurations\": [\"under-30s\"],\n    \"skippability\": [\"skippable\"]\n  },\n  \"buying\": {\n    \"dspChoice\": \"spendoptix-dsp\",\n    \"spendoptixDspRoute\": \"dv360\",\n    \"ownDspNames\": [],\n    \"seatId\": null,\n    \"dealType\": \"pmp\",\n    \"frequencyCap\": { \"impressions\": 5, \"period\": \"week\" }\n  },\n  \"plannerSettings\": {\n    \"optimiseFor\": \"balanced\",\n    \"diversification\": \"balanced\",\n    \"maxRecommendationsPerLine\": 8\n  }\n}",
-                            "options": { "raw": { "language": "json" } }
+                            "raw": "{\n  \"rawPrompt\": \"We want to run a reach campaign for Nyka, targeting women 25-34 interested in beauty, around 50 Lakh budget, premium CTV and OTT inventory, PAN India.\",\n  \"brand\": {\n    \"name\": \"Nyka\",\n    \"category\": \"Beauty & Personal Care\"\n  },\n  \"campaign\": {\n    \"objective\": \"reach\",\n    \"kpis\": [\n      { \"metric\": \"vcr\", \"target\": 65 },\n      { \"metric\": \"ctr\", \"target\": 2 }\n    ],\n    \"budget\": 5000000,\n    \"startDate\": \"2026-11-01\",\n    \"endDate\": \"2026-11-30\",\n    \"campaignMonth\": null,\n    \"seasonality\": \"Diwali\",\n    \"pacing\": \"even\",\n    \"regionalTargets\": []\n  },\n  \"audience\": {\n    \"geoScope\": \"pan-india\",\n    \"states\": [],\n    \"excludeStates\": [],\n    \"gender\": \"female\",\n    \"ageGroups\": [\"25-34\", \"35-44\"],\n    \"incomeGroups\": [\"premium\", \"upper-middle\"]\n  },\n  \"inventory\": {\n    \"platforms\": [\"ctv\", \"mobile-ott\", \"web\", \"in-app\"],\n    \"mediaTypes\": [\"display\", \"video\"],\n    \"iabCategories\": [\"IAB18 Style & Fashion\"],\n    \"keywords\": [\"beauty\", \"skincare\", \"makeup\", \"cosmetics\", \"women's lifestyle\"],\n    \"qualityTier\": \"premium-preferred\",\n    \"preferredSitesApps\": [],\n    \"blockedSitesApps\": [],\n    \"minViewabilityPct\": null,\n    \"minVcrPct\": null,\n    \"maxCpm\": 250,\n    \"minAvails\": null,\n    \"minUniqueAudience\": null,\n    \"channelCpmTargets\": []\n  },\n  \"creative\": {\n    \"displayFormats\": [],\n    \"displaySizes\": [],\n    \"videoPlacements\": [\"instream\"],\n    \"videoDurations\": [\"under-30s\"],\n    \"skippability\": [\"skippable\"]\n  },\n  \"buying\": {\n    \"dspChoice\": \"spendoptix-dsp\",\n    \"spendoptixDspRoute\": \"dv360\",\n    \"ownDspNames\": [],\n    \"seatId\": null,\n    \"dealType\": \"pmp\",\n    \"frequencyCap\": { \"impressions\": 5, \"period\": \"week\" }\n  },\n  \"plannerSettings\": {\n    \"optimiseFor\": \"balanced\",\n    \"diversification\": \"balanced\",\n    \"maxRecommendationsPerLine\": 8\n  }\n}",
+                            "options": {
+                                "raw": {
+                                    "language": "json"
+                                }
+                            }
                         }
                     }
                 },
@@ -67,13 +102,22 @@
                     "name": "Refine a plan",
                     "request": {
                         "method": "POST",
-                        "url": "{{baseUrl}}/api/v1/planner/refine",
-                        "header": [{ "key": "Content-Type", "value": "application/json" }],
-                        "description": "Regenerates a plan after the planner edits it.\n\n- input: the full current form (same shape as Generate), with any manual field edits already applied.\n- prompt: send ONLY if the prompt text was edited. Omitted/null/same as input.rawPrompt -> the earlier prompt stays unchanged and no extra AI call is made. When sent and different, an AI call updates only the form fields the prompt edit affects (manual edits are kept), and input.rawPrompt becomes the new prompt. It can be a rewritten brief or a short instruction like \"drop YouTube\" / \"remove JioHotstar\".\n- previousPlan: the plan being refined (Generate's data, or the previous Refine's data.plan).\n\nReturns { input, promptChanged, promptChanges[{field,from,to}], plan, diff{keyFigures, linesAdded, linesRemoved, lineChanges} }. For another round, send back data.input and data.plan as input/previousPlan. Nothing is persisted - save with Create/Update.\n\nAn edited prompt gets the same checks as Suggestions: 422 for junk or an edit unrelated to the plan, and \"warnings\" for invalid values the edit produced (removed from input).",
+                        "url": "{{baseUrl}}/api/v1/planner/plans/{{planId}}/refine",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "description": "Regenerates a saved plan ({{planId}}) after the planner edits it, and saves the result back under the same id.\n\n- input: the full current form (same shape as Generate), with any manual field edits already applied.\n- prompt: send ONLY if the prompt text was edited. Omitted/null/same as the saved prompt -> the saved prompt stays unchanged and no extra AI call is made. When sent and different, an AI call updates only the form fields the prompt edit affects (manual edits are kept).\n\nThe earlier prompt and plan are read from the saved plan, so they are not sent. 404 if the planId does not exist.\n\nReturns { planId, savedAt, input, promptChanged, promptChanges[{field,from,to}], warnings, plan, diff{keyFigures, linesAdded, linesRemoved, lineChanges} }. To refine again, call the same URL with the edited form (and new prompt if edited).",
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"input\": {\n    \"rawPrompt\": \"We want to run a reach campaign for Nyka, targeting women 25-34 interested in beauty, around 50 Lakh budget, premium CTV and OTT inventory, PAN India.\",\n    \"brand\": {\n      \"name\": \"Nyka\",\n      \"category\": \"Beauty & Personal Care\"\n    },\n    \"campaign\": {\n      \"objective\": \"reach\",\n      \"kpis\": [\n        {\n          \"metric\": \"vcr\",\n          \"target\": 65\n        },\n        {\n          \"metric\": \"ctr\",\n          \"target\": 2\n        }\n      ],\n      \"budget\": 5000000,\n      \"startDate\": \"2026-11-01\",\n      \"endDate\": \"2026-11-30\",\n      \"campaignMonth\": null,\n      \"seasonality\": \"Diwali\",\n      \"pacing\": \"even\",\n      \"regionalTargets\": []\n    },\n    \"audience\": {\n      \"geoScope\": \"pan-india\",\n      \"states\": [],\n      \"excludeStates\": [],\n      \"gender\": \"female\",\n      \"ageGroups\": [\n        \"25-34\",\n        \"35-44\"\n      ],\n      \"incomeGroups\": [\n        \"premium\",\n        \"upper-middle\"\n      ]\n    },\n    \"inventory\": {\n      \"platforms\": [\n        \"ctv\",\n        \"mobile-ott\",\n        \"web\",\n        \"in-app\"\n      ],\n      \"mediaTypes\": [\n        \"display\",\n        \"video\"\n      ],\n      \"iabCategories\": [\n        \"Beauty & Fitness\"\n      ],\n      \"qualityTier\": \"premium-preferred\",\n      \"preferredSitesApps\": [],\n      \"blockedSitesApps\": [\n        \"MX Player\"\n      ],\n      \"minViewabilityPct\": null,\n      \"minVcrPct\": null,\n      \"maxCpm\": 250,\n      \"minAvails\": null,\n      \"minUniqueAudience\": null,\n      \"channelCpmTargets\": []\n    },\n    \"creative\": {\n      \"displayFormats\": [],\n      \"displaySizes\": [],\n      \"videoPlacements\": [\n        \"instream\"\n      ],\n      \"videoDurations\": [\n        \"under-30s\"\n      ],\n      \"skippability\": [\n        \"skippable\"\n      ]\n    },\n    \"buying\": {\n      \"dspChoice\": \"spendoptix-dsp\",\n      \"spendoptixDspRoute\": \"dv360\",\n      \"ownDspNames\": [],\n      \"seatId\": null,\n      \"dealType\": \"pmp\",\n      \"frequencyCap\": {\n        \"impressions\": 5,\n        \"period\": \"week\"\n      }\n    },\n    \"plannerSettings\": {\n      \"optimiseFor\": \"balanced\",\n      \"diversification\": \"balanced\",\n      \"maxRecommendationsPerLine\": 8\n    }\n  },\n  \"prompt\": \"We want to run a reach campaign for Nyka, targeting women 25-34 interested in beauty, around 50 Lakh budget, premium CTV and OTT inventory, PAN India. Drop web, keep it to CTV, Mobile OTT and In-App, and push budget to 60 Lakh.\",\n  \"previousPlan\": {\n    \"//\": \"paste the data object returned by Generate (or by the last Refine call's data.plan) here\"\n  }\n}",
-                            "options": { "raw": { "language": "json" } }
+                            "raw": "{\n  \"input\": {\n    \"rawPrompt\": \"We want to run a reach campaign for Nyka, targeting women 25-34 interested in beauty, around 50 Lakh budget, premium CTV and OTT inventory, PAN India.\",\n    \"brand\": {\n      \"name\": \"Nyka\",\n      \"category\": \"Beauty & Personal Care\"\n    },\n    \"campaign\": {\n      \"objective\": \"reach\",\n      \"kpis\": [\n        {\n          \"metric\": \"vcr\",\n          \"target\": 65\n        },\n        {\n          \"metric\": \"ctr\",\n          \"target\": 2\n        }\n      ],\n      \"budget\": 5000000,\n      \"startDate\": \"2026-11-01\",\n      \"endDate\": \"2026-11-30\",\n      \"campaignMonth\": null,\n      \"seasonality\": \"Diwali\",\n      \"pacing\": \"even\",\n      \"regionalTargets\": []\n    },\n    \"audience\": {\n      \"geoScope\": \"pan-india\",\n      \"states\": [],\n      \"excludeStates\": [],\n      \"gender\": \"female\",\n      \"ageGroups\": [\n        \"25-34\",\n        \"35-44\"\n      ],\n      \"incomeGroups\": [\n        \"premium\",\n        \"upper-middle\"\n      ]\n    },\n    \"inventory\": {\n      \"platforms\": [\n        \"ctv\",\n        \"mobile-ott\",\n        \"web\",\n        \"in-app\"\n      ],\n      \"mediaTypes\": [\n        \"display\",\n        \"video\"\n      ],\n      \"iabCategories\": [\n        \"IAB18 Style & Fashion\"\n      ],\n      \"keywords\": [\n        \"beauty\",\n        \"skincare\",\n        \"makeup\"\n      ],\n      \"qualityTier\": \"premium-preferred\",\n      \"preferredSitesApps\": [],\n      \"blockedSitesApps\": [\n        \"MX Player\"\n      ],\n      \"minViewabilityPct\": null,\n      \"minVcrPct\": null,\n      \"maxCpm\": 250,\n      \"minAvails\": null,\n      \"minUniqueAudience\": null,\n      \"channelCpmTargets\": []\n    },\n    \"creative\": {\n      \"displayFormats\": [],\n      \"displaySizes\": [],\n      \"videoPlacements\": [\n        \"instream\"\n      ],\n      \"videoDurations\": [\n        \"under-30s\"\n      ],\n      \"skippability\": [\n        \"skippable\"\n      ]\n    },\n    \"buying\": {\n      \"dspChoice\": \"spendoptix-dsp\",\n      \"spendoptixDspRoute\": \"dv360\",\n      \"ownDspNames\": [],\n      \"seatId\": null,\n      \"dealType\": \"pmp\",\n      \"frequencyCap\": {\n        \"impressions\": 5,\n        \"period\": \"week\"\n      }\n    },\n    \"plannerSettings\": {\n      \"optimiseFor\": \"balanced\",\n      \"diversification\": \"balanced\",\n      \"maxRecommendationsPerLine\": 8\n    }\n  },\n  \"prompt\": \"We want to run a reach campaign for Nyka, targeting women 25-34 interested in beauty, around 50 Lakh budget, premium CTV and OTT inventory, PAN India. Drop web, keep it to CTV, Mobile OTT and In-App, and push budget to 60 Lakh.\"\n}",
+                            "options": {
+                                "raw": {
+                                    "language": "json"
+                                }
+                            }
                         }
                     }
                 },
@@ -83,9 +127,21 @@
                         "method": "GET",
                         "url": {
                             "raw": "{{baseUrl}}/api/v1/planner/plans?limit=20",
-                            "host": ["{{baseUrl}}"],
-                            "path": ["api", "v1", "planner", "plans"],
-                            "query": [{ "key": "limit", "value": "20" }]
+                            "host": [
+                                "{{baseUrl}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "planner",
+                                "plans"
+                            ],
+                            "query": [
+                                {
+                                    "key": "limit",
+                                    "value": "20"
+                                }
+                            ]
                         }
                     }
                 },
@@ -113,12 +169,21 @@
                     "request": {
                         "method": "POST",
                         "url": "{{baseUrl}}/api/v1/planner/plan",
-                        "header": [{ "key": "Content-Type", "value": "application/json" }],
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
                         "description": "Body is {\"input\", \"plan\"} — the exact two objects from Suggestions' \"data.input\" (as sent to Generate) and Generate's \"data\" response, unmodified. The server mints a UUID and returns it as \"id\" (201 Created) — paste that into the {{planId}} collection variable to use the requests below it. This is the only place a new saved record gets created; nothing here trusts a caller-supplied id.",
                         "body": {
                             "mode": "raw",
                             "raw": "{\n  \"input\": { \"...\": \"paste the exact body you sent to Generate\" },\n  \"plan\": { \"...\": \"paste the exact \\\"data\\\" object Generate returned\" }\n}",
-                            "options": { "raw": { "language": "json" } }
+                            "options": {
+                                "raw": {
+                                    "language": "json"
+                                }
+                            }
                         }
                     }
                 },
@@ -127,12 +192,21 @@
                     "request": {
                         "method": "PUT",
                         "url": "{{baseUrl}}/api/v1/planner/plans/{{planId}}",
-                        "header": [{ "key": "Content-Type", "value": "application/json" }],
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
                         "description": "Same body shape as Create, but for a planId you already have (e.g. re-saving after the user edits something). Upsert — creates it if that id doesn't exist yet, replaces it if it does.",
                         "body": {
                             "mode": "raw",
                             "raw": "{\n  \"input\": { \"...\": \"paste the exact body you sent to Generate\" },\n  \"plan\": { \"...\": \"paste the exact \\\"data\\\" object Generate returned\" }\n}",
-                            "options": { "raw": { "language": "json" } }
+                            "options": {
+                                "raw": {
+                                    "language": "json"
+                                }
+                            }
                         }
                     }
                 }

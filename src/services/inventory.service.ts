@@ -1,5 +1,5 @@
 import { Prisma, PrismaClient } from '@prisma/client';
-import { CalendarDay } from '../types/planner.types';
+import { CalendarDay, InventoryLine } from '../types/planner.types';
 
 const prisma = new PrismaClient();
 
@@ -62,4 +62,59 @@ export const getCalendar = async (fromDate: string): Promise<CalendarDay[]> => {
         event: r.event,
         multipliers: { ctv: r.ctvMultiplier, app: r.appMultiplier, web: r.webMultiplier },
     }));
+};
+
+export interface InventoryName {
+    name: string;
+    /** The raw technical id (app URL / package id / inventory URL) — '' for websites, which have none. */
+    id: string;
+    line: InventoryLine;
+}
+
+let cachedNames: InventoryName[] | null = null;
+
+/** Every distinct property across the four inventory tables — what a name in preferredSitesApps / blockedSitesApps is checked against. Cached per process like getIabCategories. */
+export const getInventoryNames = async (): Promise<InventoryName[]> => {
+    if (cachedNames) return cachedNames;
+    cachedNames = await prisma.$queryRawUnsafe<InventoryName[]>(
+        `SELECT DISTINCT application_name AS name, app_url AS id,
+                CASE WHEN type = 'OEM' THEN 'ctv-fast' ELSE 'ctv-ott' END AS line
+           FROM inventory_ctv
+         UNION SELECT DISTINCT app_name, package_id, 'mobile-ott' FROM inventory_mobile_ott
+         UNION SELECT DISTINCT inventory_name, '', 'websites' FROM inventory_websites
+         UNION SELECT DISTINCT app_name, inventory_url, 'in-app' FROM inventory_mobile_inapp`
+    );
+    return cachedNames;
+};
+
+export interface InventoryEmbedding {
+    name: string;
+    lines: InventoryLine[];
+    vector: Float32Array;
+}
+
+let cachedEmbeddings: Map<string, InventoryEmbedding> | null = null;
+
+/**
+ * inventory_embeddings keyed by lowercased name, loaded once per process (~23k × 256 floats,
+ * about 23 MB). Empty — semantic scoring then stays neutral — when the table hasn't been
+ * migrated or filled yet.
+ */
+export const getInventoryEmbeddings = async (): Promise<Map<string, InventoryEmbedding>> => {
+    if (cachedEmbeddings) return cachedEmbeddings;
+    let rows: { name: string; lines: string[]; vector: Buffer }[];
+    try {
+        rows = await prisma.inventoryEmbedding.findMany({ select: { name: true, lines: true, vector: true } });
+    } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2021') return new Map();
+        throw err;
+    }
+    cachedEmbeddings = new Map(
+        rows.map(r => {
+            // Copy out of the driver's buffer so the Float32Array is 4-byte aligned.
+            const bytes = Uint8Array.from(r.vector);
+            return [r.name, { name: r.name, lines: r.lines as InventoryLine[], vector: new Float32Array(bytes.buffer) }];
+        })
+    );
+    return cachedEmbeddings;
 };

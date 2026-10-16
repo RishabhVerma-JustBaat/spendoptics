@@ -213,3 +213,17 @@ model Calendar {
 
   @@map("calendar")
 }
+
+// One embedding per distinct inventory name across all four inventory tables (Titan Text
+// Embeddings v2, 256 dimensions, normalized), for the semantic match score and for suggesting
+// alternatives to a named property that does not exist. Keyed by the lowercased name, the
+// same key planner.candidates.ts looks candidates up by. vector = 256 little-endian float32s.
+// Written by scripts/ingest-inventory.js --embeddings, which only embeds names not stored yet.
+model InventoryEmbedding {
+  name   String   @id
+  lines  String[]
+  text   String
+  vector Bytes
+
+  @@map("inventory_embeddings")
+}

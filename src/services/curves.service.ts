@@ -10,7 +10,7 @@
  * avails × cpm to get its real cost) rather than guessing a budget figure.
  */
 import { CandidateResult } from './planner.candidates';
-import { buildPlanCore, campaignFrequency, MAX_FILL, maxSpendFor, reachAndAudience } from './allocation.service';
+import { buildPlanCore, campaignFrequency, maxFillFor, maxSpendFor, reachAndAudience } from './allocation.service';
 import { CalendarDay, GeneratedPlanCore, InventoryLine, PlannerInput } from '../types/planner.types';
 
 export interface CpmCurvePoint {
@@ -117,8 +117,8 @@ const buildMarketBudgetCurve = (candidates: CandidateResult, frequency: number):
     }
 
     const sorted = [...allCandidates].sort((a, b) => a.cpm - b.cpm);
-    // Same realistic ceiling the allocation engine uses — no buyer gets more than MAX_FILL of a property.
-    const totalAvails = sorted.reduce((sum, c) => sum + c.avails * MAX_FILL, 0);
+    // Same per-item ceiling the allocation engine uses (maxFillFor) — no buyer takes a whole property.
+    const totalAvails = sorted.reduce((sum, c) => sum + c.avails * maxFillFor(c), 0);
     const shares = Array.from({ length: POINT_COUNT }, (_, i) => (i + 1) / POINT_COUNT);
 
     const points: BudgetCurvePoint[] = shares.map(share => {
@@ -132,7 +132,7 @@ const buildMarketBudgetCurve = (candidates: CandidateResult, frequency: number):
             // Without this, one outsized property (e.g. a single app with billions of avails)
             // jumps cumulativeAvails past several consecutive share-targets in one step, making
             // this point and the next few identical instead of a real curve.
-            const take = Math.min(c.avails * MAX_FILL, targetAvails - cumulativeAvails);
+            const take = Math.min(c.avails * maxFillFor(c), targetAvails - cumulativeAvails);
             cumulativeAvails += take;
             cumulativeCost += (take / 1000) * c.cpm;
         }
@@ -189,7 +189,7 @@ const PAST_SATURATION_MULTIPLIER = 1.25;
 
 /**
  * The budget past which the engine can't place another rupee: every candidate filled to its
- * MAX_FILL ceiling. Spillover can reach any candidate in the shortlist, not just the plan's
+ * maxFillFor ceiling. Spillover can reach any candidate in the shortlist, not just the plan's
  * original picks, so this is the whole pool's buyable cost.
  */
 const saturationBudget = (candidates: CandidateResult, givenBudget: number): number =>

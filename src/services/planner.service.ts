@@ -7,7 +7,7 @@ import {
     mergePlan,
     SuggestResult,
 } from '../config/planner.prompts';
-import { buildCandidateInventory } from './planner.candidates';
+import { buildCandidateInventory, removeUnknownInventory } from './planner.candidates';
 import { buildPlanCore } from './allocation.service';
 import { buildBestDates, buildBudgetCurve, buildCpmCurve } from './curves.service';
 import { getCalendar, getIabCategories, getSupportedCountries } from './inventory.service';
@@ -25,10 +25,15 @@ export const SCHEMA_VERSION = 2; // 1 was the old, now-retired single-call /plan
  * (see plan.types.ts) — only the 10 top-level keys are a fixed contract — so this plan's very
  * different field names don't need the storage layer to change at all, just this mapping.
  */
-const toPlanSaveRequest = (planId: string, input: PlannerInput, plan: GeneratedPlan): PlanSaveRequest => ({
+const toPlanSaveRequest = (
+    planId: string,
+    input: PlannerInput,
+    plan: GeneratedPlan,
+    trigger: 'generate' | 'refine' = 'generate'
+): PlanSaveRequest => ({
     schemaVersion: SCHEMA_VERSION,
     planId,
-    source: { app: 'ai-planner', trigger: 'generate' },
+    source: { app: 'ai-planner', trigger },
     brief: {
         // The original free-text brief, carried through from Call 1 via input.rawPrompt — null
         // for a plan built entirely by hand with no suggest call involved.
@@ -113,7 +118,9 @@ export class PlannerService {
     async suggest(prompt: string): Promise<SuggestResult> {
         validatePrompt(prompt);
         const iabCategories = await getIabCategories();
-        return generateSuggestions(prompt, iabCategories);
+        const result = await generateSuggestions(prompt, iabCategories);
+        result.warnings.push(...(await removeUnknownInventory(result.input)));
+        return result;
     }
 
     /**
@@ -193,9 +200,20 @@ export class PlannerService {
      * edit itself affects are rewritten (see generateRefinement), so manual form edits survive.
      * Each response carries the refined input back, so the next round refines from it.
      */
-    async refine(input: PlannerInput, prompt: string | undefined, previousPlan: Partial<GeneratedPlan>): Promise<RefineResult> {
+    async refine(planId: string, formInput: PlannerInput, prompt: string | undefined): Promise<RefineResult> {
+        // The earlier prompt and plan come from the saved record, not the caller — the body only
+        // carries what's new. Only the parts diffPlans/generateRefinement read are rebuilt here.
+        const saved = await this.planService.getById(planId);
+        const previousPrompt = saved.brief.text?.trim() || null;
+        const previousPlan = {
+            header: saved.campaign as unknown as GeneratedPlan['header'],
+            keyFigures: saved.campaign.keyFigures as GeneratedPlan['keyFigures'],
+            budgetAllocation: saved.inventory.budgetAllocation as GeneratedPlan['budgetAllocation'],
+        };
+        const input: PlannerInput = { ...formInput, rawPrompt: previousPrompt };
+
         const newPrompt = prompt?.trim();
-        const promptChanged = !!newPrompt && newPrompt !== (input.rawPrompt ?? '').trim();
+        const promptChanged = !!newPrompt && newPrompt !== (previousPrompt ?? '');
 
         let refinedInput = input;
         let promptChanges: RefineResult['promptChanges'] = [];
@@ -210,20 +228,45 @@ export class PlannerService {
                 previousPlan,
                 iabCategories
             ));
+            warnings.push(...(await removeUnknownInventory(refinedInput)));
         }
 
         const plan = await this.generate(refinedInput);
-        return { input: refinedInput, promptChanged, promptChanges, warnings, plan, diff: diffPlans(previousPlan, plan) };
+        // Saved back under the same id, so the next refine of this planId starts from this
+        // version (its prompt and plan) rather than the one before it.
+        const { savedAt } = await this.planService.save(toPlanSaveRequest(planId, refinedInput, plan, 'refine'));
+        return {
+            planId,
+            savedAt,
+            input: refinedInput,
+            promptChanged,
+            promptChanges,
+            warnings,
+            plan,
+            diff: diffPlans(previousPlan, plan),
+        };
     }
 
     /** Creates a new saved plan with a server-generated id — the actual "create" in this API, since the id is never trusted from the caller here (unlike save(), which updates a specific, already-known id). A random UUID rather than a client-supplied one is also the safer default: nothing in this storage layer checks who owns a planId, so a guessable or caller-chosen id would be an easy way to collide with (or overwrite) someone else's plan. */
-    async create(input: PlannerInput, plan: GeneratedPlan): Promise<{ id: string; savedAt: string }> {
-        return this.save(randomUUID(), input, plan);
+    async create(input: PlannerInput, plan: GeneratedPlan, prompt?: string | null): Promise<{ id: string; savedAt: string }> {
+        return this.save(randomUUID(), input, plan, prompt);
     }
 
     /** Persists an already-generated plan under a known planId (upsert) — for a caller re-saving a plan it already has the id for. Reuses PlanService's existing storage machinery rather than duplicating it — toPlanSaveRequest above only adapts a GeneratedPlan into the save envelope it already accepts. */
-    async save(planId: string, input: PlannerInput, plan: GeneratedPlan): Promise<{ id: string; savedAt: string }> {
-        const request = toPlanSaveRequest(planId, input, plan);
+    async save(
+        planId: string,
+        input: PlannerInput,
+        plan: GeneratedPlan,
+        prompt?: string | null
+    ): Promise<{ id: string; savedAt: string }> {
+        // Prompt priority: sent explicitly > input.rawPrompt > what this planId already has saved,
+        // so re-saving an edited form without the prompt never wipes the stored one.
+        let rawPrompt = prompt?.trim() || input.rawPrompt?.trim() || null;
+        if (!rawPrompt) {
+            const existing = await this.planService.getById(planId).catch(() => null);
+            rawPrompt = existing?.brief.text?.trim() || null;
+        }
+        const request = toPlanSaveRequest(planId, { ...input, rawPrompt }, plan);
         return this.planService.save(request);
     }
 

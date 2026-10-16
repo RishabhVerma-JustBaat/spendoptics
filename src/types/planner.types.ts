@@ -152,6 +152,8 @@ export interface PlannerInput {
         platforms: Platform[];
         mediaTypes: MediaType[];
         iabCategories: string[];
+        /** Short topical keywords for what this brand fits (e.g. beauty, skincare, makeup) — what the semantic match score compares inventory against, by meaning rather than exact words. */
+        keywords: string[];
         qualityTier: QualityTier | null;
         preferredSitesApps: string[];
         blockedSitesApps: string[];
@@ -181,7 +183,8 @@ export interface PlannerInput {
     plannerSettings: {
         optimiseFor: OptimiseFor;
         diversification: Diversification;
-        maxRecommendationsPerLine: number;
+        /** Items per line. null = sized by the budget: items join one at a time as earlier ones reach their target buy % (see allocation.service.ts's pourIntoLine), so a small budget gets few items and small items pull in more. A number fixes the count. */
+        maxRecommendationsPerLine: number | null;
     };
 }
 
@@ -200,6 +203,17 @@ export interface CandidateInventoryItem {
     isPreferred: boolean;
     /** R/N from the audience-targeting formula — avails and uniqueAudience above are already multiplied by it. 1 when no demographic is targeted or the shares are unknown. */
     targetingFactor: number;
+    /** 0-1: how closely this item matches the brief — semantic closeness to the prompt and to the selected interests + audience, plus the IAB-category match (1 for a property named in preferredSitesApps). See planner.candidates.ts's scoreMatches. */
+    matchScore: number;
+    /** The share of avails this item is aimed at (0-1), set by its matchScore percentile within its line: most items 3-12% (near 10%), the weakest matches below 3%, the strongest above 12%. Its hard cap is 2x this, never above MAX_FILL. */
+    targetFill: number;
+}
+
+/** Something wrong with an input value, for the planner — removed from the input it came from. alternatives are the closest real properties when a named one doesn't exist. */
+export interface InputWarning {
+    field: string;
+    message: string;
+    alternatives?: { name: string; lines: InventoryLine[] }[];
 }
 
 export interface RecommendedInventoryItem {
@@ -213,6 +227,9 @@ export interface RecommendedInventoryItem {
     avails: number;
     uniqueAudience: number | null;
     targetingFactor: number;
+    matchScore: number;
+    /** % of this item's targetable avails the plan buys — impressions ÷ avails × 100. */
+    buyPercent: number;
     cpm: number;
     vcr: number | null;
     /** This item's own share of the line's budget/impressions — 0 for both when no campaign.budget was given at all, same as the line-level totals they're drawn from. */
@@ -287,6 +304,8 @@ export interface GeneratedPlanCore {
     kpiFit: KpiFitResult[];
     deliveryFit: DeliveryFitResult | null;
     cpmFit: CpmFitResult[];
+    /** Named properties (preferredSitesApps / blockedSitesApps) that don't exist in the inventory — left out of the plan, with the closest real alternatives. */
+    inventoryWarnings: InputWarning[];
     /** Budget that couldn't be placed because every eligible item hit its MAX_FILL ceiling — 0 when the whole budget was placed. */
     unspentBudget: number;
     buying: {
@@ -394,6 +413,7 @@ export interface GeneratedPlan {
         kpiFit: KpiFitResult[];
         deliveryFit: DeliveryFitResult | null;
         cpmFit: CpmFitResult[];
+        inventoryWarnings: InputWarning[];
         assumptions: string[];
     };
 }
@@ -416,11 +436,14 @@ export interface PlanDiff {
 
 /** What the refine route returns — the refined form (so the next refine round starts from it), the field changes an edited prompt caused, the regenerated plan, and how it differs from the previous one. */
 export interface RefineResult {
+    /** The refined plan is saved back under the same planId it was refined from. */
+    planId: string;
+    savedAt: string;
     input: PlannerInput;
     promptChanged: boolean;
     promptChanges: { field: string; from: unknown; to: unknown }[];
     /** Values the prompt edit produced that can't be right — removed from input, listed for the planner. */
-    warnings: { field: string; message: string }[];
+    warnings: InputWarning[];
     plan: GeneratedPlan;
     diff: PlanDiff;
 }

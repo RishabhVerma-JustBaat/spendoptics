@@ -29,12 +29,8 @@ export class PlannerController {
 
     refine = async (req: RequestWithId, res: Response, next: NextFunction) => {
         try {
-            const { input, prompt, previousPlan } = req.body as {
-                input: PlannerInput;
-                prompt: string | null;
-                previousPlan: Partial<GeneratedPlan>;
-            };
-            const data = await this.plannerService.refine(input, prompt ?? undefined, previousPlan);
+            const { input, prompt } = req.body as { input: PlannerInput; prompt: string | null };
+            const data = await this.plannerService.refine(req.params.planId, input, prompt ?? undefined);
             sendResponse(req, res, 200, 'Plan refined', data);
         } catch (error) {
             next(error);
@@ -43,8 +39,8 @@ export class PlannerController {
 
     create = async (req: RequestWithId, res: Response, next: NextFunction) => {
         try {
-            const { input, plan } = req.body as { input: PlannerInput; plan: GeneratedPlan };
-            const data = await this.plannerService.create(input, plan);
+            const { input, plan, prompt } = req.body as { input: PlannerInput; plan: GeneratedPlan; prompt: string | null };
+            const data = await this.plannerService.create(input, plan, prompt);
             sendResponse(req, res, 201, 'Plan created', data);
         } catch (error) {
             next(error);
@@ -54,8 +50,8 @@ export class PlannerController {
     save = async (req: RequestWithId, res: Response, next: NextFunction) => {
         try {
             const { planId } = req.params;
-            const { input, plan } = req.body as { input: PlannerInput; plan: GeneratedPlan };
-            const data = await this.plannerService.save(planId, input, plan);
+            const { input, plan, prompt } = req.body as { input: PlannerInput; plan: GeneratedPlan; prompt: string | null };
+            const data = await this.plannerService.save(planId, input, plan, prompt);
             sendResponse(req, res, 200, 'Plan saved', data);
         } catch (error) {
             next(error);

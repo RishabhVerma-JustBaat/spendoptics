@@ -5,6 +5,7 @@ import {
     CandidateInventoryItem,
     INCOME_GROUPS,
     IncomeGroup,
+    InputWarning,
     InventoryLine,
     Platform,
     PlannerInput,
@@ -12,6 +13,8 @@ import {
     RateTier,
 } from '../types/planner.types';
 import { config } from '../config/environment';
+import { cosine, embedText } from './bedrock.service';
+import { getInventoryEmbeddings, getInventoryNames, InventoryName } from './inventory.service';
 
 const prisma = new PrismaClient();
 
@@ -132,14 +135,185 @@ const websiteShares = (r: {
 
 /** Turns a row's raw avails/uniques into the targetable R. Applied before every volume/CPM filter, so minAvails, the fill caps, impressions, reach and curves all work in targetable avails. */
 const scaleByTargeting = (
-    c: Omit<CandidateInventoryItem, 'targetingFactor'>,
+    c: Omit<CandidateInventoryItem, 'targetingFactor' | 'matchScore' | 'targetFill'>,
     factor: number
 ): CandidateInventoryItem => ({
     ...c,
     avails: Math.round(c.avails * factor),
     uniqueAudience: c.uniqueAudience === null ? null : Math.round(c.uniqueAudience * factor),
     targetingFactor: Math.round(factor * 10000) / 10000,
+    // Neutral until scoreMatches runs over the whole shortlist.
+    matchScore: NEUTRAL_MATCH,
+    targetFill: targetFillFor(0.5),
 });
+
+const NEUTRAL_MATCH = 0.5;
+
+/**
+ * Target buy % for an item at match percentile `p` (0-1) within its line: the weakest 10% of
+ * matches 1-3%, the strongest 10% 12-25%, everyone between 3-12% — on a square-root curve, so
+ * the middle of the pack lands near 10% (p = 0.5 -> ~9.4%) rather than spread evenly.
+ */
+const targetFillFor = (p: number): number => {
+    if (p < 0.1) return 0.01 + 0.02 * (p / 0.1);
+    if (p > 0.9) return 0.12 + 0.13 * ((p - 0.9) / 0.1);
+    return 0.03 + 0.09 * Math.sqrt((p - 0.1) / 0.8);
+};
+
+/** The key inventory_embeddings rows are stored under — scripts/ingest-inventory.js --embeddings uses the same. */
+export const embeddingKey = (name: string): string => name.trim().toLowerCase();
+
+const describeAudience = (input: PlannerInput): string => {
+    const { gender, ageGroups, incomeGroups } = input.audience;
+    return [
+        gender === 'male' ? 'men' : gender === 'female' ? 'women' : '',
+        narrows(ageGroups, AGE_GROUPS) ? `aged ${ageGroups.join(', ')}` : '',
+        narrows(incomeGroups, INCOME_GROUPS) ? `${incomeGroups.join(', ')} income households` : '',
+    ]
+        .filter(Boolean)
+        .join(', ');
+};
+
+/**
+ * Sets every candidate's matchScore and targetFill. matchScore blends semantic closeness (item
+ * name/categories vs inventory.keywords — or the brief without them — and vs the selected
+ * interests + audience, averaged) with the
+ * IAB-category match, 70/30 when both exist; a preferredSitesApps match is always 1. The
+ * semantic part is min-max normalized across the whole shortlist, so it ranks items against each
+ * other rather than reading raw cosines (which cluster tightly). Without embeddings (table not
+ * filled, or no Bedrock key) it falls back to the IAB match alone, then to neutral.
+ */
+const scoreMatches = async (input: PlannerInput, byLine: Record<InventoryLine, CandidateInventoryItem[]>) => {
+    const all = Object.values(byLine).flat();
+    if (all.length === 0) return;
+
+    const embeddings = await getInventoryEmbeddings();
+    let semantic = new Map<CandidateInventoryItem, number>();
+    if (embeddings.size > 0) {
+        // Short keywords embed far closer to inventory names than a whole brief does (tested:
+        // beauty sites ~0.65 against keywords vs ~0.40 against the brief), so they lead; the
+        // brief is the fallback when no keywords were given.
+        const promptText =
+            (input.inventory.keywords.length > 0 ? input.inventory.keywords.join(', ') : null) ??
+            input.rawPrompt ??
+            [input.brand.name, input.brand.category, input.campaign.objective && `${input.campaign.objective} campaign`]
+                .filter(Boolean)
+                .join(', ');
+        const audience = describeAudience(input);
+        const targetingText = [
+            input.inventory.iabCategories.length > 0 ? `Interests: ${input.inventory.iabCategories.join(', ')}` : '',
+            audience ? `Audience: ${audience}` : '',
+        ]
+            .filter(Boolean)
+            .join('. ');
+        const queries = (await Promise.all([embedText(promptText), embedText(targetingText)])).filter(
+            (v): v is Float32Array => v !== null
+        );
+        if (queries.length > 0) {
+            for (const c of all) {
+                const e = embeddings.get(embeddingKey(c.name));
+                if (e) semantic.set(c, queries.reduce((sum, q) => sum + cosine(q, e.vector), 0) / queries.length);
+            }
+            const values = [...semantic.values()];
+            const min = Math.min(...values);
+            const range = Math.max(...values) - min;
+            semantic = new Map([...semantic].map(([c, v]) => [c, range > 0 ? (v - min) / range : NEUTRAL_MATCH]));
+        }
+    }
+
+    const asked = input.inventory.iabCategories;
+    for (const c of all) {
+        const s = semantic.get(c);
+        const iab =
+            asked.length > 0 && c.iabCategories !== null ? (c.iabCategories.some(cat => asked.includes(cat)) ? 1 : 0) : undefined;
+        c.matchScore = c.isPreferred
+            ? 1
+            : s !== undefined && iab !== undefined
+              ? 0.7 * s + 0.3 * iab
+              : (s ?? iab ?? NEUTRAL_MATCH);
+        c.matchScore = Math.round(c.matchScore * 1000) / 1000;
+    }
+
+    // Percentile within the line (ties share the midpoint), so every line spreads its own items
+    // across the 1-25% range regardless of how its raw scores compare to another line's.
+    for (const items of Object.values(byLine)) {
+        for (const c of items) {
+            const below = items.filter(o => o.matchScore < c.matchScore).length;
+            const equal = items.filter(o => o.matchScore === c.matchScore).length;
+            c.targetFill = targetFillFor(items.length === 1 ? 0.5 : (below + (equal - 1) / 2) / (items.length - 1));
+        }
+    }
+};
+
+const ALTERNATIVES_PER_NAME = 5;
+
+/** Character-trigram overlap — the fallback for ranking alternatives when there are no embeddings. */
+const trigramSimilarity = (a: string, b: string): number => {
+    const grams = (s: string) => {
+        const c = ` ${compact(s)} `;
+        return new Set(Array.from({ length: Math.max(c.length - 2, 0) }, (_, i) => c.slice(i, i + 3)));
+    };
+    const ga = grams(a);
+    const gb = grams(b);
+    const shared = [...ga].filter(g => gb.has(g)).length;
+    return shared / Math.max(ga.size + gb.size - shared, 1);
+};
+
+/** The closest real properties to a name that doesn't exist: semantic neighbours when embeddings exist, spelling neighbours otherwise. */
+const alternativesFor = async (term: string, names: InventoryName[]): Promise<NonNullable<InputWarning['alternatives']>> => {
+    const embeddings = await getInventoryEmbeddings();
+    const query = embeddings.size > 0 ? await embedText(term) : null;
+    if (query) {
+        return [...embeddings.values()]
+            .map(e => ({ e, sim: cosine(query, e.vector) }))
+            .sort((a, b) => b.sim - a.sim)
+            .slice(0, ALTERNATIVES_PER_NAME)
+            .map(({ e }) => ({ name: e.name, lines: e.lines }));
+    }
+    const byName = new Map<string, InventoryLine[]>();
+    for (const n of names) byName.set(n.name, [...(byName.get(n.name) ?? []), n.line]);
+    return [...byName]
+        .map(([name, lines]) => ({ name, lines: [...new Set(lines)], sim: trigramSimilarity(term, name) }))
+        .sort((a, b) => b.sim - a.sim)
+        .slice(0, ALTERNATIVES_PER_NAME)
+        .map(({ name, lines }) => ({ name, lines }));
+};
+
+/**
+ * Names in preferredSitesApps / blockedSitesApps that match no real property in any inventory
+ * table (same name/id matching the candidate fetchers use) — a bogus or misspelt property —
+ * each with the closest real alternatives. `term` is the entry as given.
+ */
+export const findUnknownInventory = async (input: PlannerInput): Promise<(InputWarning & { term: string })[]> => {
+    const terms = [
+        ...input.inventory.preferredSitesApps.map(term => ({ field: 'inventory.preferredSitesApps', term })),
+        ...input.inventory.blockedSitesApps.map(term => ({ field: 'inventory.blockedSitesApps', term })),
+    ].filter(t => t.term.trim() !== '');
+    if (terms.length === 0) return [];
+
+    const names = await getInventoryNames();
+    const unknown = terms.filter(
+        ({ term }) => !names.some(n => caseInsensitiveMatch(n.name, [term]) || caseInsensitiveMatchId(n.id, [term]))
+    );
+    return Promise.all(
+        unknown.map(async ({ field, term }) => ({
+            field,
+            term,
+            message: `"${term}" isn't in the inventory, so it can't be ${field.endsWith('blockedSitesApps') ? 'excluded' : 'planned'}.`,
+            alternatives: await alternativesFor(term, names),
+        }))
+    );
+};
+
+/** Drops unknown names from preferredSitesApps / blockedSitesApps (in place) and returns them as warnings with alternatives. */
+export const removeUnknownInventory = async (input: PlannerInput): Promise<InputWarning[]> => {
+    const unknown = await findUnknownInventory(input);
+    for (const { field, term } of unknown) {
+        const key = field === 'inventory.preferredSitesApps' ? 'preferredSitesApps' : 'blockedSitesApps';
+        input.inventory[key] = input.inventory[key].filter(t => t !== term);
+    }
+    return unknown.map(({ term: _term, ...warning }) => warning);
+};
 
 /** At or below this many states, geo targeting is narrow enough to price up. */
 const MAX_STATES_FOR_UPLIFT = 4;
@@ -195,6 +369,9 @@ const hasWordBoundaryMatch = (value: string, term: string): boolean => {
     return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, 'i').test(value);
 };
 
+/** Shortest name that may count as matched just because a longer term contains it. */
+const MIN_CONTAINED_NAME = 5;
+
 const caseInsensitiveMatch = (value: string, list: string[]): boolean => {
     if (!value) return false; // an empty value would otherwise match every entry via ''.includes()
     const lower = value.toLowerCase();
@@ -209,12 +386,20 @@ const caseInsensitiveMatch = (value: string, list: string[]): boolean => {
         // that apart from a real "wsj.com" match, so short terms require a real boundary (string
         // start/end or a non-alphanumeric character) on both sides instead.
         if (e.length < 5) return hasWordBoundaryMatch(value, e) || hasWordBoundaryMatch(e, value);
-        if (lower.includes(e) || e.includes(lower)) return true;
+        // The reverse direction (the term contains the whole name) only for names of 5+ characters —
+        // a short real name like "App" or "TV" is contained in almost any multi-word term.
+        if (lower.includes(e) || (lower.length >= MIN_CONTAINED_NAME && e.includes(lower))) return true;
         // Compacting (stripping spaces/punctuation) catches a real multi-word name variant that
         // the raw check above misses entirely — e.g. "Tarang Plus" vs. the sheet's "TarangPlus",
         // which has no boundary between the two words at all to match on.
+        // Both sides must survive compacting: a name in another script (e.g. Devanagari) compacts
+        // to '', and every string includes '' — that matched every such name against any term.
         const eCompact = compact(entry);
-        return eCompact.length > 0 && (valueCompact.includes(eCompact) || eCompact.includes(valueCompact));
+        return (
+            eCompact.length > 0 &&
+            valueCompact.length > 0 &&
+            (valueCompact.includes(eCompact) || (valueCompact.length >= MIN_CONTAINED_NAME && eCompact.includes(valueCompact)))
+        );
     });
 };
 
@@ -449,6 +634,7 @@ export interface CandidateResult {
     byLine: Record<InventoryLine, CandidateInventoryItem[]>;
     /** Requested platforms with zero real data behind them at all (YouTube, or anything the filters left with nothing) — these never reach the LLM, they go straight to plannedByTeam. */
     unplannablePlatforms: Platform[];
+    inventoryWarnings: InputWarning[];
 }
 
 /** Stage 1 — deterministic, no LLM. Builds the real shortlist the allocation engine and narration call both work from. */
@@ -505,7 +691,12 @@ export const buildCandidateInventory = async (input: PlannerInput): Promise<Cand
         return lines.length === 0 || lines.every(line => byLine[line].length === 0);
     });
 
-    return { byLine, unplannablePlatforms };
+    await scoreMatches(input, byLine);
+
+    // Named properties that exist nowhere: left out of the plan, reported with alternatives.
+    const inventoryWarnings = (await findUnknownInventory(input)).map(({ term: _term, ...warning }) => warning);
+
+    return { byLine, unplannablePlatforms, inventoryWarnings };
 };
 
 const PLATFORMS_ALL: Platform[] = [

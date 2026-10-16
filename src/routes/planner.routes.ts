@@ -16,9 +16,6 @@ router.post('/suggestions', authenticateBearer, validateBody(suggestPromptSchema
 // actually gets created, with a server-minted id (see planner.service.ts's create() comment
 // for why the id is never trusted from the caller here).
 router.post('/generate', authenticateBearer, validateBody(generatePlanSchema), plannerController.generate);
-// Re-generates a plan after the planner edits the form and/or the prompt — takes the edited
-// input, the new prompt (only if it changed), and the previous output to diff against.
-router.post('/refine', authenticateBearer, validateBody(refinePlanSchema), plannerController.refine);
 router.get('/plans', authenticateBearer, plannerController.list);
 router.get('/plans/:planId', authenticateBearer, plannerController.getById);
 router.post('/plan', authenticateBearer, validateBody(savePlanSchema), plannerController.create);
@@ -26,5 +23,9 @@ router.post('/plan', authenticateBearer, validateBody(savePlanSchema), plannerCo
 // (e.g. re-saving after an edit), unlike POST /plan above which always mints a new id.
 router.put('/plans/:planId', authenticateBearer, validateBody(savePlanSchema), plannerController.save);
 router.post('/plans/:planId/approve', authenticateBearer, plannerController.approve);
+// Re-generates a saved plan after the planner edits the form and/or the prompt. The body is just
+// the edited form plus the new prompt (only if it changed); the earlier prompt and plan come
+// from the saved record, and the result is saved back under the same id.
+router.post('/plans/:planId/refine', authenticateBearer, validateBody(refinePlanSchema), plannerController.refine);
 
 export { router as plannerRoutes };
