@@ -27,6 +27,20 @@ export class PlannerController {
         }
     };
 
+    refine = async (req: RequestWithId, res: Response, next: NextFunction) => {
+        try {
+            const { input, prompt, previousPlan } = req.body as {
+                input: PlannerInput;
+                prompt: string | null;
+                previousPlan: Partial<GeneratedPlan>;
+            };
+            const data = await this.plannerService.refine(input, prompt ?? undefined, previousPlan);
+            sendResponse(req, res, 200, 'Plan refined', data);
+        } catch (error) {
+            next(error);
+        }
+    };
+
     create = async (req: RequestWithId, res: Response, next: NextFunction) => {
         try {
             const { input, plan } = req.body as { input: PlannerInput; plan: GeneratedPlan };

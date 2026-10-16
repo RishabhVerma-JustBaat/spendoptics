@@ -1,7 +1,11 @@
 import { z } from 'zod';
 import { generateStructured } from '../services/bedrock.service';
+import { logger } from '../utils/logger';
+import { ApiError } from '../utils/apiError';
+import { removeInvalidValues } from '../validations/planner.validations';
 import {
     AGE_GROUPS,
+    INCOME_GROUPS,
     CurveCommentary,
     DEAL_TYPES,
     DIVERSIFICATIONS,
@@ -10,6 +14,7 @@ import {
     GENDERS,
     GEO_SCOPES,
     GeneratedPlan,
+    BestDates,
     GeneratedPlanCore,
     KPI_METRICS,
     MEDIA_TYPES,
@@ -26,7 +31,7 @@ import {
     VIDEO_DURATIONS,
     VIDEO_PLACEMENTS,
 } from '../types/planner.types';
-import { BudgetCurveResult, CpmCurveResult } from '../services/curves.service';
+import { BestDatesResult, BudgetCurveResult, CpmCurveResult } from '../services/curves.service';
 
 /** Parses a "key::value" entry; a malformed one (no "::") is dropped rather than guessed at. */
 const parseKeyValue = (entry: string): { key: string; value: string } | null => {
@@ -66,6 +71,7 @@ export const buildEmptyPlannerInput = (): PlannerInput => ({
         excludeStates: [],
         gender: null,
         ageGroups: [],
+        incomeGroups: [],
     },
     inventory: {
         platforms: [],
@@ -138,6 +144,7 @@ const FIELD_VALIDATORS: Record<string, (value: unknown) => boolean> = {
     'audience.excludeStates': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
     'audience.gender': v => (GENDERS as readonly string[]).includes(v as string),
     'audience.ageGroups': v => Array.isArray(v) && v.every(x => (AGE_GROUPS as readonly string[]).includes(x)),
+    'audience.incomeGroups': v => Array.isArray(v) && v.every(x => (INCOME_GROUPS as readonly string[]).includes(x)),
     'inventory.platforms': v => Array.isArray(v) && v.every(x => (PLATFORMS as readonly string[]).includes(x)),
     'inventory.mediaTypes': v => Array.isArray(v) && v.every(x => (MEDIA_TYPES as readonly string[]).includes(x)),
     'inventory.iabCategories': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
@@ -190,27 +197,34 @@ const buildSuggestSchema = () =>
         // parallel structure describing the same ~55 fields as nested objects risked not
         // fitting at all.
         suggestions: z.array(z.string()),
+        // Whether the text is a media brief at all — judged here rather than in a separate
+        // call, since this call already has to read it. False means nothing else in the
+        // response is used.
+        isMediaBrief: z.boolean(),
+        notABriefReason: z.string().nullable(),
     });
 
 const FIELD_REFERENCE = `brand.name (text — ONLY if literally stated, never inferred/assumed), brand.category (text — your own inference from the brand, not a fixed list; leave out if the brand gives no real signal)
 campaign.objective (one of: ${OBJECTIVES.join(', ')}), campaign.kpis (list of {"metric":"vcr"|"ctr","target":number|null} — ONLY these 2 metrics, nothing else), campaign.budget (number, INR, no shorthand — "50 Lakh" -> 5000000, "1 Crore" -> 10000000 — NEVER leave this out, always give a real number even if assumed), campaign.startDate/campaign.endDate (YYYY-MM-DD), campaign.campaignMonth (YYYY-MM, only if exact dates aren't known), campaign.seasonality (text), campaign.pacing (one of: ${PACINGS.join(', ')}), campaign.regionalTargets (list of {"region":text,"impressions":number} — see the table-parsing rule below)
-audience.country (text — the real-world country this ask is for, e.g. "India", "USA" — NEVER leave this out; default "India" unless the brief clearly names somewhere else), audience.geoScope (one of: ${GEO_SCOPES.join(', ')}), audience.states (text list, only used when geoScope is "states"), audience.excludeStates (text list — ONLY if literally stated, never inferred/assumed), audience.gender (one of: ${GENDERS.join(', ')} — NEVER leave this out), audience.ageGroups (list from: ${AGE_GROUPS.join(', ')} — NEVER leave this out)
+audience.country (text — the real-world country this ask is for, e.g. "India", "USA" — NEVER leave this out; default "India" unless the brief clearly names somewhere else), audience.geoScope (one of: ${GEO_SCOPES.join(', ')}), audience.states (text list, only used when geoScope is "states"), audience.excludeStates (text list — ONLY if literally stated, never inferred/assumed), audience.gender (one of: ${GENDERS.join(', ')} — NEVER leave this out), audience.ageGroups (list from: ${AGE_GROUPS.join(', ')} — NEVER leave this out), audience.incomeGroups (list from: ${INCOME_GROUPS.join(', ')} — monthly household income: premium ₹1,00,000+, upper-middle ₹60,000-99,999, middle ₹30,000-59,999, lower-middle ₹15,000-29,999, value under ₹15,000; see the conditional rule below)
 inventory.platforms (list from: ${PLATFORMS.join(', ')} — "ctv-oem"/"ctv-fast" both mean ad-supported FAST channels like Samsung TV Plus/TCL Channel; "ctv-ott" means on-demand CTV apps like JioHotstar/ZEE5/MX Player; plain "ctv" means both), inventory.mediaTypes (list from: ${MEDIA_TYPES.join(', ')}), inventory.iabCategories (text list, only real categories, see rule below), inventory.qualityTier (one of: ${QUALITY_TIERS.join(', ')}), inventory.preferredSitesApps/blockedSitesApps (text lists — ONLY if literally stated, never inferred/assumed), inventory.minViewabilityPct/minVcrPct (0-100), inventory.maxCpm (INR, a single overall cap — only use this when one CPM applies to everything), inventory.minAvails/minUniqueAudience (numbers), inventory.channelCpmTargets (list of {"platform":one of the platform values above,"maxCpm":number} — use this instead of maxCpm whenever different platforms are asked about at different rates, e.g. "₹130 for OTT-CTV, ₹100 for FAST")
 creative.displayFormats/displaySizes (text lists), creative.videoPlacements (list from: ${VIDEO_PLACEMENTS.join(', ')}), creative.videoDurations (list from: ${VIDEO_DURATIONS.join(', ')}), creative.skippability (list from: ${SKIPPABILITY.join(', ')})
 buying.dspChoice (one of: ${DSP_CHOICES.join(', ')} — ONLY if literally stated, never inferred/assumed), buying.spendoptixDspRoute (one of: ${SPENDOPTIX_DSP_ROUTES.join(', ')}, only if dspChoice is spendoptix-dsp), buying.ownDspNames (text list, only if dspChoice is own-dsp), buying.seatId (text), buying.dealType (one of: ${DEAL_TYPES.join(', ')}), buying.frequencyCap ({"impressions":number,"period":"${FREQUENCY_CAP_PERIODS.join('"|"')}"})
 plannerSettings.optimiseFor (one of: ${OPTIMISE_FOR.join(', ')}, default balanced), plannerSettings.diversification (one of: ${DIVERSIFICATIONS.join(', ')}, default balanced), plannerSettings.maxRecommendationsPerLine (number, default 8)`;
 
 const buildSuggestSystemPrompt = (iabCategories: string[]): string =>
-    `You turn a free-text media-planning brief into pre-filled form fields for a programmatic media-planning console. The brief can be messy, casual, or missing most details — your job is to fill in every field below anyway, never leaving the form blank, so the planner reviews a complete draft instead of an empty one.
+    `First decide "isMediaBrief": true when the text is in any way a request to plan, price, or check advertising (a campaign, a brand, a budget, channels/platforms, an audience, or asking whether specific inventory/publishers are available) — be generous, a two-line casual ask or a bare "CTV campaign for 10 lakh" counts. false only when it clearly isn't one: keyboard mash or unintelligible text, or an unrelated request (a poem, code, general questions, chit-chat). When false, set "notABriefReason" to one short sentence for the planner saying why (e.g. "This reads as a general knowledge question, not an advertising brief.") and leave "suggestions" empty; when true, set it to null.
+
+You turn a free-text media-planning brief into pre-filled form fields for a programmatic media-planning console. The brief can be messy, casual, or missing most details — your job is to fill in every field below anyway, never leaving the form blank, so the planner reviews a complete draft instead of an empty one.
 
 For EVERY field, decide one of three provenance tags:
 - "stated" — the brief literally says this (a number, a name, an explicit instruction).
 - "inferred" — not stated, but you can reasonably work it out from context (e.g. a brand's product category from its name, a sensible objective from the tone of the ask).
 - "assumed" — nothing in the brief gives any signal at all; you picked a plausible default.
 
-Never skip a field because nothing was said — tag it "assumed" and give your best reasonable default instead. Two fields are conditional exceptions: "inventory.iabCategories" (only suggest one of these real categories: ${iabCategories.join(', ')} — leave it unsuggested if genuinely nothing fits, since inventing one that doesn't exist in the real data defeats its purpose) and "brand.category" (leave it out if the brand name gives no real signal at all — an unfamiliar or ambiguous name shouldn't get a guessed category).
+Never skip a field because nothing was said — tag it "assumed" and give your best reasonable default instead. Three fields are conditional exceptions: "audience.incomeGroups" (only when the brief signals income or affluence, e.g. "affluent", "HNI", "SEC A", "budget-conscious" — leave it out otherwise, since an assumed income band raises the plan's price), "inventory.iabCategories" (only suggest one of these real categories: ${iabCategories.join(', ')} — leave it unsuggested if genuinely nothing fits, since inventing one that doesn't exist in the real data defeats its purpose) and "brand.category" (leave it out if the brand name gives no real signal at all — an unfamiliar or ambiguous name shouldn't get a guessed category).
 
-A separate set of fields works the other way around — they may ONLY ever be tagged "stated", never "inferred" or "assumed": brand.name, buying.dspChoice (and its dependents spendoptixDspRoute/ownDspNames), audience.excludeStates, inventory.preferredSitesApps, inventory.blockedSitesApps. If the brief doesn't literally name one of these, leave the field out entirely — a guessed brand name, DSP preference, excluded state, or preferred/blocked property is worse than an honestly blank field here. These five fields (plus the two conditional ones above) are the ONLY fields ever allowed to be left out — every other field below, including ones with no obvious signal (e.g. campaign.startDate, campaign.pacing, audience.geoScope), must still get a real "assumed" value per the main rule; never apply this "leave it out" treatment to a field that isn't explicitly named in this paragraph or the one above it.
+A separate set of fields works the other way around — they may ONLY ever be tagged "stated", never "inferred" or "assumed": brand.name, buying.dspChoice (and its dependents spendoptixDspRoute/ownDspNames), audience.excludeStates, inventory.preferredSitesApps, inventory.blockedSitesApps. If the brief doesn't literally name one of these, leave the field out entirely — a guessed brand name, DSP preference, excluded state, or preferred/blocked property is worse than an honestly blank field here. These five fields (plus the three conditional ones above) are the ONLY fields ever allowed to be left out — every other field below, including ones with no obvious signal (e.g. campaign.startDate, campaign.pacing, audience.geoScope), must still get a real "assumed" value per the main rule; never apply this "leave it out" treatment to a field that isn't explicitly named in this paragraph or the one above it.
 
 "brand.name" specifically means the ADVERTISER running this campaign — never a publisher, app, channel, or property the brief is asking *about*. A brief that asks "do you have inventory on X and Y" or "what are your rates for X" is asking about X and Y as properties, not naming an advertiser at all — in that case leave brand.name out entirely and put X and Y into inventory.preferredSitesApps instead (tagged "stated"), since that's what the brief is actually naming. Only use brand.name when the brief identifies whose campaign this is, distinct from any property/publisher it also mentions.
 
@@ -267,6 +281,8 @@ const applySuggestion = (input: PlannerInput, field: string, value: unknown): bo
 export interface SuggestResult {
     input: PlannerInput;
     provenance: Record<string, Provenance>;
+    /** Values the model extracted that can't be right (past dates, a VCR over 100%, a made-up state, ...) — dropped from input, listed here for the planner. See planner.validations.ts. */
+    warnings: { field: string; message: string }[];
 }
 
 /**
@@ -294,6 +310,9 @@ export const generateSuggestions = async (
         schema: buildSuggestSchema(),
         maxTokens: 4096,
     });
+    if (!result.isMediaBrief) {
+        throw new ApiError(422, result.notABriefReason || "This doesn't read as an advertising brief.");
+    }
 
     const input = buildEmptyPlannerInput();
     // The original brief, carried through verbatim — not something the model decides, so it's
@@ -311,6 +330,12 @@ export const generateSuggestions = async (
         }
     }
 
+    // Before the fallbacks below, so a dropped bogus budget still gets the assumed default.
+    const warnings = removeInvalidValues(input, iabCategories);
+    for (const { field } of warnings) {
+        if (isUnset(input, field)) delete provenance[field];
+    }
+
     // Safety net for the one field this contract can least afford to go missing: the prompt
     // tells the model budget can never be left out, but verified live that on a long/data-dense
     // brief (e.g. a big region/impressions table) it occasionally still does. A code-level
@@ -325,7 +350,219 @@ export const generateSuggestions = async (
         provenance['audience.country'] = 'assumed';
     }
 
-    return { input, provenance };
+    return { input, provenance, warnings };
+};
+
+/** True when a dropped field ended up back at its blank-form value, so its provenance tag no longer describes anything. */
+const isUnset = (input: PlannerInput, field: string): boolean => {
+    const [section, key] = field.split('.');
+    const get = (o: unknown) => (o as Record<string, Record<string, unknown>>)[section]?.[key];
+    return JSON.stringify(get(input)) === JSON.stringify(get(buildEmptyPlannerInput()));
+};
+
+// ============================================================================
+// Refine — an edited prompt applied on top of an already-vetted form.
+// ============================================================================
+
+/**
+ * Typed value slots instead of suggest's "field::jsonValue" string — verified live that this
+ * call, unlike suggest, reliably broke on JSON nested inside a JSON string (a list value needs
+ * escaped quotes): it wrote "field:[...]" with one colon, or stalled mid-string until it hit
+ * max tokens. One small object shape with 5 keys is nowhere near the grammar-size ceiling
+ * buildSuggestSchema's comment is about. Object-shaped fields go in `list` as "a::b" strings,
+ * same idea as the narration call's flat arrays — see REFINE_OBJECT_PARSERS.
+ */
+const buildRefineSchema = () =>
+    z.object({
+        // Same idea as the suggest call's isMediaBrief, for the edit itself.
+        isPlanEdit: z.boolean(),
+        notAnEditReason: z.string().nullable(),
+        changes: z.array(
+            z.object({
+                field: z.string(),
+                text: z.string().nullable(),
+                number: z.number().nullable(),
+                list: z.array(z.string()).nullable(),
+                clear: z.boolean(),
+            })
+        ),
+    });
+
+/** null for anything that isn't a real finite number — Number("abc") is NaN, which would pass a plain typeof check. */
+const toNumberOrNull = (s: string | undefined): number | null => {
+    const n = s === undefined || s.trim() === '' ? NaN : Number(s.replace(/,/g, ''));
+    return Number.isFinite(n) ? n : null;
+};
+
+/** How the object-shaped fields come back in the `list` slot (frequencyCap in `text`), turned back into the shapes FIELD_VALIDATORS expects. */
+const REFINE_OBJECT_PARSERS: Record<string, (list: string[] | null, text: string | null) => unknown> = {
+    'campaign.kpis': list =>
+        list?.map(entry => {
+            const [metric, target] = entry.split('::');
+            return { metric, target: toNumberOrNull(target) };
+        }),
+    'campaign.regionalTargets': list =>
+        list?.map(entry => {
+            const [region, impressions] = entry.split('::');
+            return { region, impressions: Number(impressions) };
+        }),
+    'inventory.channelCpmTargets': list =>
+        list?.map(entry => {
+            const [platform, maxCpm] = entry.split('::');
+            return { platform, maxCpm: Number(maxCpm) };
+        }),
+    'buying.frequencyCap': (_list, text) => {
+        if (!text) return undefined;
+        const [impressions, period] = text.split('::');
+        return { impressions: toNumberOrNull(impressions), period };
+    },
+};
+
+const buildRefineSystemPrompt = (iabCategories: string[]): string =>
+    `First decide "isPlanEdit": true when the edit is in any way about this campaign or plan (its budget, dates, audience, channels, inventory, KPIs, rates, or a rewritten brief) — be generous with short or casual instructions. false only when the edit clearly isn't: keyboard mash or unintelligible text, or an unrelated request (a poem, code, general questions, chit-chat). When false, set "notAnEditReason" to one short sentence for the planner saying why and leave "changes" empty; when true, set it to null.
+
+You update an already-filled media-planning form after the planner edits their brief. The form you're given is the planner's current, vetted version — it may already contain manual edits they made by hand, and those must be kept. A plan has already been generated from it; you're shown a summary of that plan for context.
+
+Your only job: compare the earlier brief with the new brief, work out what the planner changed or added, and output ONLY the form fields that difference requires changing. Never re-derive, "tidy up", or re-guess a field the new wording doesn't touch — if a field isn't affected by what changed between the two briefs, leave it out entirely, even if you'd have filled it differently from scratch. Outputting zero changes is a valid answer when the edit doesn't affect any field.
+
+Where the current form disagrees with the earlier brief (e.g. the brief says "25-34" but the form has two age groups), the planner edited that field by hand on purpose — never change it back to match the brief unless the NEW wording explicitly talks about that field. When the new wording changes one entry of a list (e.g. one KPI target), keep every other entry exactly as it is in the current form.
+
+The new brief may be a full rewritten brief or just a short instruction about the existing plan (e.g. "drop YouTube", "push more budget to CTV", "remove JioHotstar", "make it 50 Lakh") — handle both. Map instructions about the existing plan onto form fields, since the plan itself is always regenerated from the form: removing a property -> inventory.blockedSitesApps (keep its existing entries and add to them), favouring a property -> inventory.preferredSitesApps, dropping/adding a channel -> inventory.platforms (always remove a dropped channel from inventory.platforms when it's listed there, even if the previous plan shows no budget line for it — the plan summary only lists channels that got budget, not everything the form asks for), wanting cheaper/more reach/better quality -> plannerSettings.optimiseFor or inventory.qualityTier, fewer/more properties -> plannerSettings.diversification or maxRecommendationsPerLine.
+
+For list fields, output the complete new list (existing entries that should stay, plus additions, minus removals) — never only the delta. To clear a field back to unset (e.g. "remove the CPM cap"), set "clear" to true.
+
+"inventory.iabCategories" may only contain these real categories: ${iabCategories.join(', ')}. "brand.name" means the advertiser running this campaign, never a publisher or property being asked about.
+
+Today's date is ${new Date().toISOString().slice(0, 10)}. Resolve a date with no year to this year if it hasn't passed yet, or next year if it has. Every comma-grouped number in the briefs has already been annotated with its exact digit value in brackets (e.g. "8,14,32,000 [=81432000]") — always use that bracketed value as-is. "50 Lakh" -> 5000000, "1 Crore" -> 10000000. Money is always INR.
+
+Fields and their types/allowed values:
+${FIELD_REFERENCE}
+
+Output one object per changed field in "changes": "field" is the exact dot path above, and the new value goes in exactly one slot, leaving the other slots null and "clear" false:
+- "number" for numeric fields (campaign.budget, inventory.maxCpm, inventory.minViewabilityPct, ...)
+- "text" for single text/choice fields (campaign.objective, audience.gender, plannerSettings.optimiseFor, campaign.startDate, ...)
+- "list" for list fields (inventory.platforms, inventory.blockedSitesApps, audience.ageGroups, ...)
+Object-shaped fields are written as "a::b" strings instead: campaign.kpis -> list of "metric::target" (e.g. "vcr::65", "ctr::null"), campaign.regionalTargets -> list of "region::impressions", inventory.channelCpmTargets -> list of "platform::maxCpm", buying.frequencyCap -> text "impressions::period" (e.g. "5::week").
+To clear a field, set "clear" true and leave every slot null.`;
+
+/** A compact view of the plan being refined — only what helps the model map "drop X" / "more CTV" onto form fields. previousPlan is round-tripped from the client and not shape-checked, so every access is guarded. */
+const summarisePreviousPlan = (plan: Partial<GeneratedPlan>): string => {
+    const lines = Array.isArray(plan.budgetAllocation) ? plan.budgetAllocation : [];
+    if (lines.length === 0) return '(no previous plan details given)';
+    return lines
+        .map(
+            line =>
+                `- ${line.inventoryLine}: ${line.sharePercent}% share, ₹${line.amount} — ` +
+                (Array.isArray(line.recommendedInventory)
+                    ? line.recommendedInventory.map(item => item.name).join(', ')
+                    : '')
+        )
+        .join('\n');
+};
+
+export interface RefineFieldChange {
+    field: string;
+    from: unknown;
+    to: unknown;
+}
+
+/**
+ * Applies an edited brief to an already-vetted form. Unlike generateSuggestions this never
+ * starts from a blank form — it starts from `input` (the planner's manual edits included) and
+ * only overwrites what the brief edit itself changed, so a planner's hand edits survive any
+ * number of refine rounds.
+ */
+export const generateRefinement = async (
+    input: PlannerInput,
+    previousPrompt: string | null,
+    newPrompt: string,
+    previousPlan: Partial<GeneratedPlan>,
+    iabCategories: string[]
+): Promise<{ input: PlannerInput; changes: RefineFieldChange[]; warnings: { field: string; message: string }[] }> => {
+    const { rawPrompt: _rawPrompt, ...form } = input;
+    // The common case is text appended to the earlier brief. Working out that difference is
+    // mechanical, so do it here — verified live that when left to compare the two full briefs
+    // itself, the model also "corrected" untouched fields (e.g. reverting a hand-edited age
+    // group back to what the earlier brief said).
+    const addedText =
+        previousPrompt && newPrompt.startsWith(previousPrompt.trim())
+            ? newPrompt.slice(previousPrompt.trim().length).trim()
+            : null;
+    const result = await generateStructured<ReturnType<typeof buildRefineSchema>>({
+        system: buildRefineSystemPrompt(iabCategories),
+        prompt: `${addedText ? `What the planner added to the brief (the ONLY text to act on — change only fields this text explicitly asks for):\n"""\n${annotateCommaGroupedNumbers(addedText)}\n"""\n\n` : ''}Earlier brief:
+"""
+${previousPrompt ? annotateCommaGroupedNumbers(previousPrompt) : '(none — the form was built by hand)'}
+"""
+
+New brief:
+"""
+${annotateCommaGroupedNumbers(newPrompt)}
+"""
+
+Current form (keep everything the brief edit doesn't touch):
+${JSON.stringify(form)}
+
+Plan previously generated from it:
+${summarisePreviousPlan(previousPlan)}`,
+        schema: buildRefineSchema(),
+        maxTokens: 2048,
+        temperature: 0.2,
+    });
+    if (!result.isPlanEdit) {
+        throw new ApiError(422, result.notAnEditReason || "This edit doesn't read as a change to the plan.");
+    }
+
+    const refined: PlannerInput = JSON.parse(JSON.stringify(input));
+    refined.rawPrompt = newPrompt;
+    const empty = buildEmptyPlannerInput() as unknown as Record<string, Record<string, unknown>>;
+    const changes: RefineFieldChange[] = [];
+
+    for (const entry of result.changes) {
+        const validator = FIELD_VALIDATORS[entry.field];
+        if (!validator) {
+            logger.warn('Refine change dropped: unknown field', { entry });
+            continue;
+        }
+        const [section, key] = entry.field.split('.');
+
+        let value: unknown;
+        if (entry.clear) {
+            // Cleared back to buildEmptyPlannerInput's own value, so a cleared field ends up in
+            // exactly the same state as one suggest never filled.
+            value = empty[section][key];
+        } else {
+            // The model doesn't always pick the right slot (e.g. a budget as text "3000000"),
+            // so take the first candidate that actually validates for this field.
+            const objectParser = REFINE_OBJECT_PARSERS[entry.field];
+            const candidates = objectParser
+                ? [objectParser(entry.list, entry.text)]
+                : [entry.list, entry.number, entry.text, toNumberOrNull(entry.text ?? undefined)];
+            value = candidates.find(c => c !== null && c !== undefined && validator(c));
+            if (value === undefined) {
+                logger.warn('Refine change dropped: invalid value', { entry });
+                continue;
+            }
+        }
+
+        const from = (refined as unknown as Record<string, Record<string, unknown>>)[section][key];
+        if (JSON.stringify(from) === JSON.stringify(value)) continue;
+        if (applySuggestion(refined, entry.field, value)) {
+            changes.push({ field: entry.field, from, to: value });
+        }
+    }
+
+    // A bogus value the edit introduced is dropped; its change is reported as what actually
+    // landed, or not at all when nothing did.
+    const warnings = removeInvalidValues(refined, iabCategories);
+    const landed = changes
+        .map(c => {
+            const [section, key] = c.field.split('.');
+            return { ...c, to: (refined as unknown as Record<string, Record<string, unknown>>)[section][key] };
+        })
+        .filter(c => JSON.stringify(c.from) !== JSON.stringify(c.to));
+
+    return { input: refined, changes: landed, warnings };
 };
 
 // ============================================================================
@@ -360,11 +597,10 @@ const buildNarrationSchema = () =>
         // OTT tables), so the id alone isn't a unique key — line is part of it too.
         itemReasons: z.array(z.string()),
         assumptions: z.array(z.string()),
-        // "startDate::endDate::score::reason" — Best Dates has no historical avails/CPM
-        // time-series or events-calendar data behind it at all, so unlike everything else in
-        // this call, "score" here is the model's own judgment, not a system computation — a
-        // deliberate, scoped exception (see this section's top comment and the product
-        // decision that Best Dates runs on AI reasoning until that data exists).
+        // "startDate::endDate::score::reason" — when the viewership calendar covers the flight,
+        // the windows and scores come from curves.service.ts and only "reason" is used.
+        // Otherwise "score" is the model's own judgment, not a system computation — a
+        // deliberate, scoped exception (see this section's top comment).
         recommendedWindows: z.array(z.string()),
         // "startDate::endDate::reason" — same 3-field shape as recommendedWindows (minus the
         // score) rather than a single "dateRange" field, since a date range naturally wants
@@ -374,7 +610,13 @@ const buildNarrationSchema = () =>
         givenVsBest: z.string().nullable(),
     });
 
-const buildNarrationSystemPrompt = (): string =>
+/** Rule 6: with calendar data the windows are already decided and only need reasons; without it the model judges them itself. */
+const bestDatesRule = (calendarDates: BestDatesResult | null): string =>
+    calendarDates
+        ? `"recommendedWindows": the flight windows you're given were already picked and scored from the viewership calendar. Output exactly one "startDate::endDate::score::reason" string per window given, copying startDate, endDate and score unchanged, and write only the reason: one sentence citing that window's events and its viewership multiplier (vs 1.00x for a typical weekday, weighted by this plan's channel mix), e.g. "Covers Dhanteras through Bhai Dooj, averaging 1.27x typical-weekday viewership for this channel mix." "datesToAvoid": one "startDate::endDate::reason" string per range given, dates unchanged, the reason saying why viewership is below typical there. "givenVsBest": null (already computed). The multipliers are planning assumptions, not measured traffic — never call them measured or guaranteed.`
+        : `"recommendedWindows" is up to 3 flight-date windows as "startDate::endDate::score::reason" strings (dates as YYYY-MM-DD, every date must be on or after ${new Date().toISOString().slice(0, 10)} — never recommend a window that's already in the past) — your own judgment on good timing for this brand/category/objective (seasonality, festivals, typical category patterns), since there's no real historical booking data behind this yet. "score" is a 0-100 confidence number you assign, not a measured figure — be honest that it's a judgment call, not a guarantee. "datesToAvoid" is "startDate::endDate::reason" strings (same date rule) for windows to avoid (e.g. clashing with a major unrelated event). "givenVsBest" compares the input's own dates (if given) to your top recommended window in one sentence, or null if no dates were given to compare.`;
+
+const buildNarrationSystemPrompt = (calendarDates: BestDatesResult | null): string =>
     `You are the narration engine behind a programmatic media-planning console. A plan has already been fully decided by a deterministic engine — which inventory was picked, how much budget goes where, every number (reach, impressions, CPM). Your only job is to write the human-readable text explaining decisions that are already final. You do not choose anything, and nothing you write should contradict a number or a selection you're given — if a number looks surprising, explain it, don't second-guess it.
 
 Hard rules:
@@ -383,10 +625,14 @@ Hard rules:
 3. "lineReasons" is one "line::reason" string per budget line you're given, each reason a short sentence on why that line earned its share (e.g. "ctv-fast::Premium ad-supported channel inventory with the strongest VCR for an awareness objective.").
 4. "itemReasons" is one "line|inventoryId::reason" string per recommended item you're given, each reason specific to that item's role and numbers WITHIN that line only (e.g. a reach-driver's reason cites its avails, a cost-efficient item's reason cites its CPM) — never a reason blending two different lines together. The same inventoryId can appear under more than one line (the same real property can be both a CTV row and a Mobile OTT row) — treat each line|inventoryId pair as its own separate item needing its own separate reason, even when the id repeats. Use the exact line and inventoryId you were given, unchanged — never invent either.
 5. "assumptions" lists anything the deterministic engine had to default because the input didn't specify it (you're told what was left unset) — plain language, one per line.
-6. "recommendedWindows" is up to 3 flight-date windows as "startDate::endDate::score::reason" strings (dates as YYYY-MM-DD, every date must be on or after ${new Date().toISOString().slice(0, 10)} — never recommend a window that's already in the past) — your own judgment on good timing for this brand/category/objective (seasonality, festivals, typical category patterns), since there's no real historical booking data behind this yet. "score" is a 0-100 confidence number you assign, not a measured figure — be honest that it's a judgment call, not a guarantee. "datesToAvoid" is "startDate::endDate::reason" strings (same date rule) for windows to avoid (e.g. clashing with a major unrelated event). "givenVsBest" compares the input's own dates (if given) to your top recommended window in one sentence, or null if no dates were given to compare.
+6. ${bestDatesRule(calendarDates)}
 7. All money amounts are in Indian Rupees — use "₹", never "$" or "USD", anywhere you mention an amount.`;
 
-const buildNarrationPrompt = (input: PlannerInput, core: GeneratedPlanCore): string => {
+const buildNarrationPrompt = (
+    input: PlannerInput,
+    core: GeneratedPlanCore,
+    calendarDates: BestDatesResult | null
+): string => {
     const unsetFields: string[] = [];
     if (input.campaign.budget === null) unsetFields.push('campaign.budget');
     if (input.campaign.startDate === null && input.campaign.endDate === null) {
@@ -400,6 +646,7 @@ const buildNarrationPrompt = (input: PlannerInput, core: GeneratedPlanCore): str
 Campaign: ${JSON.stringify(input.campaign)}
 Audience targeting given: ${JSON.stringify(input.audience)}
 Rate tier used: ${core.rateTier}
+Targeting price uplift on the base CPM (already in every number): ${core.pricing.upliftPercent}% ${JSON.stringify(core.pricing.uplifts)}
 Fields left unset by the input (defaulted by the engine): ${unsetFields.join(', ') || '(none)'}
 
 Budget lines (already decided):
@@ -419,12 +666,24 @@ ${core.budgetAllocation
 Key figures (already decided): ${JSON.stringify(core.keyFigures)}
 Budget left unspent because the available inventory filled up (already decided — mention it plainly in the summary if above 0): ₹${core.unspentBudget}
 KPI fit (already decided): ${JSON.stringify(core.kpiFit)}
-Platforms that couldn't be planned automatically: ${JSON.stringify(core.plannedByTeam)}`;
+Platforms that couldn't be planned automatically: ${JSON.stringify(core.plannedByTeam)}${
+        calendarDates
+            ? `
+
+Best-date windows (already decided from the viewership calendar):
+${calendarDates.recommendedWindows
+    .map(w => `- ${w.startDate}::${w.endDate} score=${w.score} multiplier=${w.viewershipMultiplier}x events=${JSON.stringify(w.events)}`)
+    .join('\n')}
+Dates to avoid (already decided):
+${calendarDates.datesToAvoid.map(d => `- ${d.startDate}::${d.endDate} multiplier=${d.viewershipMultiplier}x events=${JSON.stringify(d.events)}`).join('\n') || '(none)'}`
+            : ''
+    }`;
 };
 
 export const generateNarration = async (
     input: PlannerInput,
-    core: GeneratedPlanCore
+    core: GeneratedPlanCore,
+    calendarDates: BestDatesResult | null
 ): Promise<PlanNarration> => {
     // One fixed ceiling broke in production on a larger plan: "itemReasons" needs one sentence
     // per recommended item across every line (up to maxRecommendationsPerLine × number of
@@ -438,8 +697,8 @@ export const generateNarration = async (
     const maxTokens = Math.min(8192, 1536 + totalItems * 100);
 
     const result = await generateStructured<ReturnType<typeof buildNarrationSchema>>({
-        system: buildNarrationSystemPrompt(),
-        prompt: buildNarrationPrompt(input, core),
+        system: buildNarrationSystemPrompt(calendarDates),
+        prompt: buildNarrationPrompt(input, core, calendarDates),
         schema: buildNarrationSchema(),
         maxTokens,
         temperature: 0.2,
@@ -467,7 +726,7 @@ export const generateNarration = async (
         if (parsed) itemReasons[parsed.key] = parsed.value;
     }
 
-    const recommendedWindows = result.recommendedWindows
+    const aiWindows = result.recommendedWindows
         .map(entry => {
             const parts = entry.split('::');
             if (parts.length !== 4) return null;
@@ -478,12 +737,12 @@ export const generateNarration = async (
         })
         .filter((w): w is NonNullable<typeof w> => w !== null);
 
-    const datesToAvoid = result.datesToAvoid
+    const aiAvoid = result.datesToAvoid
         .map(entry => {
             const parts = entry.split('::');
             if (parts.length !== 3) return null;
             const [startDate, endDate, reason] = parts;
-            return { dateRange: `${startDate} to ${endDate}`, reason };
+            return { startDate, endDate, reason };
         })
         .filter((d): d is NonNullable<typeof d> => d !== null);
 
@@ -494,11 +753,40 @@ export const generateNarration = async (
         lineReasons,
         itemReasons,
         assumptions: result.assumptions,
-        bestDates: {
-            recommendedWindows,
-            datesToAvoid,
-            givenVsBest: result.givenVsBest,
-        },
+        bestDates: calendarDates
+            ? mergeCalendarDates(calendarDates, aiWindows, aiAvoid)
+            : {
+                  source: 'ai-estimate',
+                  recommendedWindows: aiWindows.map(w => ({ ...w, viewershipMultiplier: null, events: [] })),
+                  datesToAvoid: aiAvoid.map(d => ({ dateRange: `${d.startDate} to ${d.endDate}`, reason: d.reason })),
+                  givenVsBest: result.givenVsBest,
+              },
+    };
+};
+
+/** The calendar's windows, dates and scores win; the model only supplies each one's reason, matched by start::end, with a plain fallback if it skipped one. */
+const mergeCalendarDates = (
+    calendarDates: BestDatesResult,
+    aiWindows: { startDate: string; endDate: string; reason: string }[],
+    aiAvoid: { startDate: string; endDate: string; reason: string }[]
+): BestDates => {
+    const reasonFor = (list: { startDate: string; endDate: string; reason: string }[], startDate: string, endDate: string) =>
+        list.find(e => e.startDate === startDate && e.endDate === endDate)?.reason;
+    return {
+        source: 'calendar',
+        recommendedWindows: calendarDates.recommendedWindows.map(w => ({
+            ...w,
+            reason:
+                reasonFor(aiWindows, w.startDate, w.endDate) ??
+                `Averages ${w.viewershipMultiplier}x typical-weekday viewership for this channel mix.`,
+        })),
+        datesToAvoid: calendarDates.datesToAvoid.map(d => ({
+            dateRange: `${d.startDate} to ${d.endDate}`,
+            reason:
+                reasonFor(aiAvoid, d.startDate, d.endDate) ??
+                `Viewership below a typical weekday (${d.viewershipMultiplier}x) for this channel mix.`,
+        })),
+        givenVsBest: calendarDates.givenVsBest,
     };
 };
 
@@ -568,6 +856,7 @@ export const mergePlan = (
     },
     keyFigures: core.keyFigures,
     flight: core.flight,
+    pricing: core.pricing,
     bestDates: narration.bestDates,
     budgetCurve: {
         points: budgetCurve.points,

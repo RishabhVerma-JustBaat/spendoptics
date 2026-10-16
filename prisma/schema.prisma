@@ -198,3 +198,18 @@ model InventoryMobileInApp {
 
   @@map("inventory_mobile_inapp")
 }
+
+// "<Month> <Year> Viewership Multiplier Calendar" sheets — one row per calendar day, how that
+// day's viewership compares to a typical weekday (1.00x) per channel. Blank sheet cells mean no
+// event override and are stored as 1.00, per the sheet's own Notes tab. A combined weekend +
+// holiday day carries one multiplier, never stacked. Illustrative planning assumptions, not
+// measured traffic. One sheet per month, upserted by date, so months accumulate.
+model Calendar {
+  date          DateTime @id @db.Date
+  event         String?
+  ctvMultiplier Float    @map("ctv_multiplier")
+  appMultiplier Float    @map("app_multiplier")
+  webMultiplier Float    @map("web_multiplier")
+
+  @@map("calendar")
+}

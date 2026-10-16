@@ -11,7 +11,7 @@
  */
 import { CandidateResult } from './planner.candidates';
 import { buildPlanCore, campaignFrequency, MAX_FILL, maxSpendFor, reachAndAudience } from './allocation.service';
-import { PlannerInput } from '../types/planner.types';
+import { CalendarDay, GeneratedPlanCore, InventoryLine, PlannerInput } from '../types/planner.types';
 
 export interface CpmCurvePoint {
     cpmCap: number;
@@ -249,5 +249,167 @@ export const buildBudgetCurve = (
         recommendedBudget: null,
         diminishingReturnsPoint: findDiminishingReturnsPoint(points),
         givenVsRecommended: null,
+    };
+};
+
+// ============================================================================
+// Best dates — from the calendar table (scripts/ingest-calendar.js): every possible flight
+// window inside the calendar's coverage is scored by its average viewership multiplier,
+// weighted by the plan's own channel mix, and the best non-overlapping ones are recommended.
+// The narration call only writes each window's reason. Returns null when the calendar can't
+// cover the flight (no data yet, or a flight longer than the covered run of days), and the
+// narration call falls back to its own judgment.
+// ============================================================================
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const isoDay = (d: Date): string => d.toISOString().slice(0, 10);
+
+/** Flight length searched for when the input gives no dates. */
+const DEFAULT_FLIGHT_DAYS = 7;
+const MAX_WINDOWS = 3;
+
+type Channel = 'ctv' | 'app' | 'web';
+
+/** Which of the sheet's three multiplier columns each output line reads. */
+const LINE_CHANNEL: Record<InventoryLine, Channel> = {
+    'ctv-fast': 'ctv',
+    'ctv-ott': 'ctv',
+    'mobile-ott': 'app',
+    'in-app': 'app',
+    websites: 'web',
+};
+
+export interface ScoredWindow {
+    startDate: string;
+    endDate: string;
+    score: number;
+    viewershipMultiplier: number;
+    events: string[];
+}
+
+export interface BestDatesResult {
+    recommendedWindows: ScoredWindow[];
+    /** Runs of days below typical-weekday viewership (weighted multiplier < 1) for this channel mix. */
+    datesToAvoid: { startDate: string; endDate: string; viewershipMultiplier: number; events: string[] }[];
+    givenVsBest: string | null;
+}
+
+const addDays = (iso: string, days: number): string => isoDay(new Date(new Date(iso).getTime() + days * DAY_MS));
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+/** Share of the plan's spend per channel. With no spend placed, the planned lines count equally; with no lines, all three channels do. */
+const channelWeights = (core: GeneratedPlanCore): Record<Channel, number> => {
+    const weights: Record<Channel, number> = { ctv: 0, app: 0, web: 0 };
+    const total = core.budgetAllocation.reduce((sum, l) => sum + l.amount, 0);
+    for (const line of core.budgetAllocation) {
+        weights[LINE_CHANNEL[line.inventoryLine]] += total > 0 ? line.amount / total : 1 / core.budgetAllocation.length;
+    }
+    if (core.budgetAllocation.length === 0) return { ctv: 1 / 3, app: 1 / 3, web: 1 / 3 };
+    return weights;
+};
+
+const flightDays = (input: PlannerInput): number => {
+    const { startDate, endDate } = input.campaign;
+    if (!startDate || !endDate) return DEFAULT_FLIGHT_DAYS;
+    const days = Math.round((new Date(endDate).getTime() - new Date(startDate).getTime()) / DAY_MS) + 1;
+    return days >= 1 ? days : DEFAULT_FLIGHT_DAYS;
+};
+
+/** Splits the calendar into runs of consecutive dates — a window can't span a gap with no data. */
+const consecutiveRuns = (days: CalendarDay[]): CalendarDay[][] => {
+    const runs: CalendarDay[][] = [];
+    for (const day of days) {
+        const run = runs[runs.length - 1];
+        if (run && addDays(run[run.length - 1].date, 1) === day.date) run.push(day);
+        else runs.push([day]);
+    }
+    return runs;
+};
+
+const eventsIn = (days: CalendarDay[]): string[] =>
+    days.filter(d => d.event !== null).map(d => `${d.date}: ${d.event}`);
+
+const formatRange = (startDate: string, endDate: string): string =>
+    startDate === endDate ? startDate : `${startDate} to ${endDate}`;
+
+export const buildBestDates = (
+    input: PlannerInput,
+    core: GeneratedPlanCore,
+    calendar: CalendarDay[]
+): BestDatesResult | null => {
+    const length = flightDays(input);
+    const weights = channelWeights(core);
+    const dayMultiplier = (d: CalendarDay): number =>
+        weights.ctv * d.multipliers.ctv + weights.app * d.multipliers.app + weights.web * d.multipliers.web;
+
+    const runs = consecutiveRuns(calendar);
+    const windows: (ScoredWindow & { days: CalendarDay[] })[] = [];
+    for (const run of runs) {
+        for (let i = 0; i + length <= run.length; i++) {
+            const days = run.slice(i, i + length);
+            windows.push({
+                startDate: days[0].date,
+                endDate: days[days.length - 1].date,
+                score: 0,
+                viewershipMultiplier: days.reduce((sum, d) => sum + dayMultiplier(d), 0) / length,
+                events: eventsIn(days),
+                days,
+            });
+        }
+    }
+    if (windows.length === 0) return null;
+
+    // Score = share of all possible windows this one beats, so 100 is the best the calendar
+    // allows for this flight length and channel mix — relative, not a viewership figure.
+    const sortedValues = windows.map(w => w.viewershipMultiplier).sort((a, b) => a - b);
+    for (const w of windows) {
+        const beaten = sortedValues.filter(v => v < w.viewershipMultiplier).length;
+        w.score = windows.length === 1 ? 100 : Math.round((100 * beaten) / (windows.length - 1));
+    }
+
+    // Best first (earlier date on ties), then greedily skip any window overlapping one already picked.
+    const ranked = [...windows].sort(
+        (a, b) => b.viewershipMultiplier - a.viewershipMultiplier || a.startDate.localeCompare(b.startDate)
+    );
+    const picked: typeof windows = [];
+    for (const w of ranked) {
+        if (picked.length === MAX_WINDOWS) break;
+        if (picked.every(p => w.endDate < p.startDate || w.startDate > p.endDate)) picked.push(w);
+    }
+
+    const datesToAvoid: BestDatesResult['datesToAvoid'] = [];
+    for (const run of runs) {
+        let low: CalendarDay[] = [];
+        const flush = () => {
+            if (low.length === 0) return;
+            datesToAvoid.push({
+                startDate: low[0].date,
+                endDate: low[low.length - 1].date,
+                viewershipMultiplier: round2(low.reduce((sum, d) => sum + dayMultiplier(d), 0) / low.length),
+                events: eventsIn(low),
+            });
+            low = [];
+        };
+        for (const day of run) {
+            if (dayMultiplier(day) < 1) low.push(day);
+            else flush();
+        }
+        flush();
+    }
+
+    const best = picked[0];
+    const { startDate, endDate } = input.campaign;
+    let givenVsBest: string | null = null;
+    if (startDate && endDate) {
+        const given = windows.find(w => w.startDate === startDate && w.endDate === endDate);
+        givenVsBest = given
+            ? `Your flight (${formatRange(startDate, endDate)}) averages ${round2(given.viewershipMultiplier)}x typical-weekday viewership for this channel mix, against ${round2(best.viewershipMultiplier)}x for the top window (${formatRange(best.startDate, best.endDate)}).`
+            : `Your flight (${formatRange(startDate, endDate)}) falls outside the viewership calendar (${calendar[0].date} to ${calendar[calendar.length - 1].date}), so it can't be compared.`;
+    }
+
+    return {
+        recommendedWindows: picked.map(({ days, ...w }) => ({ ...w, viewershipMultiplier: round2(w.viewershipMultiplier) })),
+        datesToAvoid,
+        givenVsBest,
     };
 };

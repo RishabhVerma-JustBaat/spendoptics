@@ -23,7 +23,13 @@ import {
     RecommendedInventoryItem,
     Role,
 } from '../types/planner.types';
-import { CandidateResult, computeRateTier, DEFAULT_UNSAFE_KEYWORDS, PLATFORM_LINE_MAP } from './planner.candidates';
+import {
+    CandidateResult,
+    computePriceUplift,
+    computeRateTier,
+    DEFAULT_UNSAFE_KEYWORDS,
+    PLATFORM_LINE_MAP,
+} from './planner.candidates';
 import { config } from '../config/environment';
 
 /** Normalizes a value into [0, 1] against the max in its set — 0 if every value in the set is 0. */
@@ -165,12 +171,16 @@ const selectForLine = (
 /**
  * No plan can realistically buy all of a property's avails, so the more of it a plan has
  * already bought, the smaller the share of each further rupee it gets — the rest flows to
- * less-bought items. Past the last tier the property takes nothing more at all.
+ * less-bought items. Buying up to 10% of a property is ideal (flat full weight, and spillover
+ * only starts once every pick is past it), 10–30% is increasingly discouraged, and past 30%
+ * the property takes nothing more at all.
  */
 export const FILL_TIERS = [
-    { upToFill: 0.2, weight: 1 },
-    { upToFill: 0.4, weight: 0.5 },
-    { upToFill: 0.6, weight: 0.25 },
+    { upToFill: 0.1, weight: 1 },
+    { upToFill: 0.15, weight: 0.4 },
+    { upToFill: 0.2, weight: 0.2 },
+    { upToFill: 0.25, weight: 0.1 },
+    { upToFill: 0.3, weight: 0.05 },
 ] as const;
 export const MAX_FILL = FILL_TIERS[FILL_TIERS.length - 1].upToFill;
 
@@ -349,6 +359,7 @@ const PLATFORM_FOR_LINE: Record<InventoryLine, Platform> = {
  */
 export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput): GeneratedPlanCore => {
     const tier = computeRateTier(input);
+    const pricing = computePriceUplift(input);
     const budget = input.campaign.budget ?? 0;
     const frequency = campaignFrequency(input);
 
@@ -390,6 +401,7 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
                 environment: PLATFORM_FOR_LINE[selection.line],
                 avails: item.candidate.avails,
                 uniqueAudience: item.candidate.uniqueAudience,
+                targetingFactor: item.candidate.targetingFactor,
                 cpm: item.candidate.cpm,
                 vcr: item.candidate.vcr,
                 amount: Math.round(amount),
@@ -417,10 +429,13 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
     const averageCpm =
         estimatedImpressions > 0 ? Math.round((totalCpmWeighted / estimatedImpressions) * 1000) : 0;
 
-    // Every candidate cpm already carries the flat margin (planner.candidates.ts's clientCpm), so
-    // what the client pays splits back into media cost and our commission by that same factor.
+    // Every candidate cpm already carries the flat margin and the targeting uplift
+    // (planner.candidates.ts's clientCpm), so what the client pays splits back into media cost
+    // and our commission by those same factors — the uplift is ours, not the publisher's.
     const clientSpend = budgetAllocation.reduce((sum, l) => sum + l.amount, 0);
-    const mediaCost = Math.round(clientSpend / (1 + config.plannerMarginPercent / 100));
+    const mediaCost = Math.round(
+        clientSpend / (1 + config.plannerMarginPercent / 100) / (1 + pricing.upliftPercent / 100)
+    );
 
     // Reach and audience come from the agreed impressions → reach → audience chain (see
     // reachAndAudience), summed from the per-item figures so the totals reconcile exactly with
@@ -458,6 +473,7 @@ export const buildPlanCore = (candidates: CandidateResult, input: PlannerInput):
             pacing: input.campaign.pacing,
         },
         rateTier: tier,
+        pricing,
         budgetAllocation,
         plannedByTeam,
         kpiFit,

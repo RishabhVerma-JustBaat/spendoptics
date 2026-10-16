@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { authenticateBearer } from '../middleware/auth.middleware';
 import { validateBody } from '../middleware/validate.middleware';
-import { generatePlanSchema, savePlanSchema, suggestPromptSchema } from '../validations/planner.validations';
+import { generatePlanSchema, refinePlanSchema, savePlanSchema, suggestPromptSchema } from '../validations/planner.validations';
 import { PlannerController } from '../controllers/planner.controller';
 
 const router = Router();
@@ -16,6 +16,9 @@ router.post('/suggestions', authenticateBearer, validateBody(suggestPromptSchema
 // actually gets created, with a server-minted id (see planner.service.ts's create() comment
 // for why the id is never trusted from the caller here).
 router.post('/generate', authenticateBearer, validateBody(generatePlanSchema), plannerController.generate);
+// Re-generates a plan after the planner edits the form and/or the prompt — takes the edited
+// input, the new prompt (only if it changed), and the previous output to diff against.
+router.post('/refine', authenticateBearer, validateBody(refinePlanSchema), plannerController.refine);
 router.get('/plans', authenticateBearer, plannerController.list);
 router.get('/plans/:planId', authenticateBearer, plannerController.getById);
 router.post('/plan', authenticateBearer, validateBody(savePlanSchema), plannerController.create);

@@ -1,18 +1,170 @@
 import { PrismaClient } from '@prisma/client';
 import {
+    AGE_GROUPS,
+    AgeGroup,
     CandidateInventoryItem,
+    INCOME_GROUPS,
+    IncomeGroup,
     InventoryLine,
     Platform,
     PlannerInput,
+    PriceUplift,
     RateTier,
 } from '../types/planner.types';
 import { config } from '../config/environment';
 
 const prisma = new PrismaClient();
 
-/** The client-facing CPM: the sheet's cost CPM plus our flat margin (config.plannerMarginPercent). Applied here, at load time, so every filter (maxCpm), score, split, curve and cpmFit check downstream works in the price the client actually pays. */
-export const clientCpm = (costCpm: number): number =>
-    Math.round(costCpm * (1 + config.plannerMarginPercent / 100) * 100) / 100;
+/** The client-facing CPM: the sheet's cost CPM plus our flat margin (config.plannerMarginPercent) — the base price — then the targeting uplift (computePriceUplift) on top of that base. Applied here, at load time, so every filter (maxCpm), score, split, curve and cpmFit check downstream works in the price the client actually pays. */
+export const clientCpm = (costCpm: number, upliftPercent: number): number =>
+    Math.round(costCpm * (1 + config.plannerMarginPercent / 100) * (1 + upliftPercent / 100) * 100) / 100;
+
+/** Picking every band is the same as not targeting by that dimension at all. */
+const narrows = (selected: readonly string[], all: readonly string[]): boolean =>
+    selected.length > 0 && all.some(v => !selected.includes(v));
+
+const hasAudienceTargeting = (input: PlannerInput): boolean =>
+    narrows(input.audience.ageGroups, AGE_GROUPS) ||
+    narrows(input.audience.incomeGroups, INCOME_GROUPS) ||
+    (input.audience.gender !== null && input.audience.gender !== 'all');
+
+/** IAB categories are the form's interest targeting. */
+const hasInterestTargeting = (input: PlannerInput): boolean => input.inventory.iabCategories.length > 0;
+
+/** The sheet's own age bands — it stops at one combined "55+", so 55-64 and 65+ both read it. */
+type ShareAgeBand = '18-24' | '25-34' | '35-44' | '45-54' | '55+';
+const SHARE_BAND_FOR_AGE: Record<AgeGroup, ShareAgeBand> = {
+    '18-24': '18-24',
+    '25-34': '25-34',
+    '35-44': '35-44',
+    '45-54': '45-54',
+    '55-64': '55+',
+    '65+': '55+',
+};
+
+/** Share (0-1) of an item's audience in each band, per dimension; null where unknown. */
+export interface DemographicShares {
+    gender: Record<'male' | 'female', number> | null;
+    age: Record<ShareAgeBand, number> | null;
+    income: Record<IncomeGroup, number> | null;
+}
+
+/**
+ * Shares for lines whose sheets have no demographic columns (and for website rows whose
+ * Demographics/Wallet text didn't parse). null = not known yet, so that line isn't shrunk by
+ * targeting at all — fill these in once the figures are agreed.
+ */
+export const DEFAULT_LINE_SHARES: Record<InventoryLine, DemographicShares | null> = {
+    'ctv-fast': null,
+    'ctv-ott': null,
+    'mobile-ott': null,
+    websites: null,
+    'in-app': null,
+};
+
+/** Powers for the selected filters' shares, largest share first: it counts fully, each further one counts less, so overlapping filters don't shrink R as if they were independent. */
+const TARGETING_EXPONENTS = [1, 0.5, 0.25];
+
+/**
+ * R / N in R = N × p₁ × p₂^0.5 × p₃^0.25, where each p is the share of the item's audience in
+ * the selected bands of one targeted dimension (age, gender, income), sorted largest first.
+ * Dimensions not narrowed (nothing or every band picked, gender "all") or with unknown shares
+ * are left out.
+ */
+export const targetingFactor = (input: PlannerInput, shares: DemographicShares | null): number => {
+    if (!shares) return 1;
+    const { gender, ageGroups, incomeGroups } = input.audience;
+    const ps: number[] = [];
+    if (shares.gender && (gender === 'male' || gender === 'female')) ps.push(shares.gender[gender]);
+    if (shares.age && narrows(ageGroups, AGE_GROUPS)) {
+        const bands = new Set(ageGroups.map(a => SHARE_BAND_FOR_AGE[a]));
+        ps.push([...bands].reduce((sum, b) => sum + shares.age![b], 0));
+    }
+    if (shares.income && narrows(incomeGroups, INCOME_GROUPS)) {
+        ps.push(incomeGroups.reduce((sum, g) => sum + shares.income![g], 0));
+    }
+    return ps
+        .map(p => Math.min(1, Math.max(0, p)))
+        .sort((a, b) => b - a)
+        .reduce((factor, p, i) => factor * p ** TARGETING_EXPONENTS[i], 1);
+};
+
+const pctShare = (pct: number | null): number | null => (pct === null ? null : pct / 100);
+
+/** A website row's own shares from its parsed Demographics / Wallet size columns; a dimension with any band missing falls back to DEFAULT_LINE_SHARES.websites. */
+const websiteShares = (r: {
+    genderMalePct: number | null;
+    genderFemalePct: number | null;
+    age1824Pct: number | null;
+    age2534Pct: number | null;
+    age3544Pct: number | null;
+    age4554Pct: number | null;
+    age55PlusPct: number | null;
+    walletT1Pct: number | null;
+    walletT2Pct: number | null;
+    walletT3Pct: number | null;
+    walletT4Pct: number | null;
+    walletT5Pct: number | null;
+}): DemographicShares => {
+    const fallback = DEFAULT_LINE_SHARES.websites;
+    const all = <T extends Record<string, number | null>>(o: T) =>
+        Object.values(o).every(v => v !== null) ? (o as { [K in keyof T]: number }) : null;
+    return {
+        gender: all({ male: pctShare(r.genderMalePct), female: pctShare(r.genderFemalePct) }) ?? fallback?.gender ?? null,
+        age:
+            all({
+                '18-24': pctShare(r.age1824Pct),
+                '25-34': pctShare(r.age2534Pct),
+                '35-44': pctShare(r.age3544Pct),
+                '45-54': pctShare(r.age4554Pct),
+                '55+': pctShare(r.age55PlusPct),
+            }) ?? fallback?.age ?? null,
+        income:
+            all({
+                premium: pctShare(r.walletT1Pct),
+                'upper-middle': pctShare(r.walletT2Pct),
+                middle: pctShare(r.walletT3Pct),
+                'lower-middle': pctShare(r.walletT4Pct),
+                value: pctShare(r.walletT5Pct),
+            }) ?? fallback?.income ?? null,
+    };
+};
+
+/** Turns a row's raw avails/uniques into the targetable R. Applied before every volume/CPM filter, so minAvails, the fill caps, impressions, reach and curves all work in targetable avails. */
+const scaleByTargeting = (
+    c: Omit<CandidateInventoryItem, 'targetingFactor'>,
+    factor: number
+): CandidateInventoryItem => ({
+    ...c,
+    avails: Math.round(c.avails * factor),
+    uniqueAudience: c.uniqueAudience === null ? null : Math.round(c.uniqueAudience * factor),
+    targetingFactor: Math.round(factor * 10000) / 10000,
+});
+
+/** At or below this many states, geo targeting is narrow enough to price up. */
+const MAX_STATES_FOR_UPLIFT = 4;
+
+/**
+ * Targeting surcharges, each a percent of the base price added together, never compounded:
+ * 1–4 states +10%; any demographic (age, gender, income) +10%; interest + audience together
+ * +15% instead of that +10%. The same uplift applies to every line — rate-card premium/advanced
+ * columns aren't used, so targeting is never charged twice.
+ */
+export const computePriceUplift = (input: PlannerInput): PriceUplift => {
+    const uplifts: PriceUplift['uplifts'] = [];
+    const { geoScope, states } = input.audience;
+    if (geoScope === 'states' && states.length > 0 && states.length <= MAX_STATES_FOR_UPLIFT) {
+        uplifts.push({ rule: 'states', percent: 10 });
+    }
+    if (hasAudienceTargeting(input)) {
+        uplifts.push(
+            hasInterestTargeting(input)
+                ? { rule: 'interest-audience', percent: 15 }
+                : { rule: 'demographic', percent: 10 }
+        );
+    }
+    return { upliftPercent: uplifts.reduce((sum, u) => sum + u.percent, 0), uplifts };
+};
 
 /**
  * One platform can draw from more than one line (a bare "ctv" request wants both FAST and OTT
@@ -103,16 +255,14 @@ const failsBrandSafety = (name: string): boolean => caseInsensitiveMatch(name, D
  * Primarily data-driven (what targeting the inputs actually specify), not an LLM judgment call —
  * keeping this deterministic is what makes the whole plan reproducible for the same input. See
  * allocation.service.ts's top comment for why the plan removes LLM variance from decisions.
+ * Only a label now: prices always come from the open column plus computePriceUplift.
  */
 export const computeRateTier = (input: PlannerInput): RateTier => {
-    const hasAudienceTargeting =
-        input.audience.ageGroups.length > 0 ||
-        (input.audience.gender !== null && input.audience.gender !== 'all');
-    const hasContentTargeting = input.inventory.iabCategories.length > 0;
+    const audience = hasAudienceTargeting(input);
 
     let tier: RateTier = 'open';
-    if (hasAudienceTargeting && hasContentTargeting) tier = 'advance';
-    else if (hasAudienceTargeting) tier = 'premium';
+    if (audience && hasInterestTargeting(input)) tier = 'advance';
+    else if (audience) tier = 'premium';
 
     // quality_tier is a floor, not an override — it can only push the tier up, never down below
     // what the audience/content targeting itself already earns.
@@ -148,9 +298,8 @@ const passesVolumeFilters = (
 };
 
 /** Returns both ctv-fast and ctv-ott items in one query — buildCandidateInventory below splits them by their own .line, since whether a given platform request needs one, the other, or both is a many-to-one relationship already resolved by PLATFORM_LINE_MAP. */
-const fetchCtvCandidates = async (input: PlannerInput, tier: RateTier): Promise<CandidateInventoryItem[]> => {
+const fetchCtvCandidates = async (input: PlannerInput, upliftPercent: number): Promise<CandidateInventoryItem[]> => {
     const rows = await prisma.inventoryCtvInventory.findMany();
-    const cpmColumn = tier === 'open' ? 'cpmOpen' : tier === 'premium' ? 'cpmPremiumAudience' : 'cpmAdvanced';
     return rows
         .filter(r => !isBlocked(r.applicationName, r.appUrl, input))
         .filter(r => !failsBrandSafety(r.applicationName) && !failsBrandSafety(r.appUrl))
@@ -164,11 +313,13 @@ const fetchCtvCandidates = async (input: PlannerInput, tier: RateTier): Promise<
             platform: (r.type === 'OEM' ? 'ctv-fast' : 'ctv-ott') as Platform,
             avails: Number(r.totalImpressions),
             uniqueAudience: Number(r.totalUniques),
-            cpm: clientCpm(r[cpmColumn]),
+            cpm: clientCpm(r.cpmOpen, upliftPercent),
             vcr: r.vcr,
             iabCategories: null, // no category column in this sheet
             isPreferred: isPreferred(r.applicationName, r.appUrl, input),
         }))
+        .map(c => scaleByTargeting(c, targetingFactor(input, DEFAULT_LINE_SHARES[c.line])))
+        .filter(c => c.avails > 0)
         // A property named in preferredSitesApps bypasses these — they're meant to narrow
         // general discovery, not to hide a specifically-asked-about property that happens not to
         // clear a bar meant for everything else (verified live: wsj.com is tagged "IAB5
@@ -187,10 +338,9 @@ const fetchCtvCandidates = async (input: PlannerInput, tier: RateTier): Promise<
 
 const fetchMobileOttCandidates = async (
     input: PlannerInput,
-    tier: RateTier
+    upliftPercent: number
 ): Promise<CandidateInventoryItem[]> => {
     const rows = await prisma.inventoryMobileOttInventory.findMany();
-    const cpmColumn = tier === 'open' ? 'cpmOpen' : tier === 'premium' ? 'cpmPremiumAudience' : 'cpmAdvanced';
     return rows
         .filter(r => !isBlocked(r.appName, r.packageId, input))
         .filter(r => !failsBrandSafety(r.appName) && !failsBrandSafety(r.packageId))
@@ -202,11 +352,13 @@ const fetchMobileOttCandidates = async (
             avails: Number(r.totalAvails),
             // No separate uniques column in this sheet — left null rather than estimated.
             uniqueAudience: null,
-            cpm: clientCpm(r[cpmColumn]),
+            cpm: clientCpm(r.cpmOpen, upliftPercent),
             vcr: r.vcr,
             iabCategories: null, // no category column in this sheet
             isPreferred: isPreferred(r.appName, r.packageId, input),
         }))
+        .map(c => scaleByTargeting(c, targetingFactor(input, DEFAULT_LINE_SHARES[c.line])))
+        .filter(c => c.avails > 0)
         .filter(c => c.isPreferred || input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
         .filter(
             c =>
@@ -217,7 +369,7 @@ const fetchMobileOttCandidates = async (
         .filter(c => c.isPreferred || passesVolumeFilters(c.avails, c.uniqueAudience, input));
 };
 
-const fetchWebsiteCandidates = async (input: PlannerInput): Promise<CandidateInventoryItem[]> => {
+const fetchWebsiteCandidates = async (input: PlannerInput, upliftPercent: number): Promise<CandidateInventoryItem[]> => {
     // mediaTypes/iabCategories used to narrow this at the DB query level, but that could hide a
     // specifically-named preferredSitesApps match entirely before isPreferred is even computed
     // (verified live: wsj.com is tagged "IAB5 Education" in the real sheet, not "IAB3 Business").
@@ -233,29 +385,30 @@ const fetchWebsiteCandidates = async (input: PlannerInput): Promise<CandidateInv
         .filter(r => !isBlocked(r.inventoryName, '', input))
         .filter(r => !failsBrandSafety(r.inventoryName))
         .filter(r => isPreferred(r.inventoryName, '', input) || !wantedAdFormats || wantedAdFormats.includes(r.adFormat))
-        .map(r => ({
+        .map(r => scaleByTargeting({
             id: r.inventoryName,
             name: r.inventoryName,
             line: 'websites' as InventoryLine,
             platform: 'web' as Platform,
             avails: Number(r.totalImpressions),
             uniqueAudience: r.totalUniqueAudience === null ? null : Number(r.totalUniqueAudience),
-            cpm: clientCpm(r.buyingCpm),
+            cpm: clientCpm(r.buyingCpm, upliftPercent),
             vcr: null, // not present in this sheet
             iabCategories: r.iabCategories,
             isPreferred: isPreferred(r.inventoryName, '', input),
-        }))
+        }, targetingFactor(input, websiteShares(r))))
+        .filter(c => c.avails > 0)
         .filter(
             c =>
                 c.isPreferred ||
                 input.inventory.iabCategories.length === 0 ||
-                c.iabCategories.some(cat => input.inventory.iabCategories.includes(cat))
+                (c.iabCategories ?? []).some(cat => input.inventory.iabCategories.includes(cat))
         )
         .filter(c => c.isPreferred || input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
         .filter(c => c.isPreferred || passesVolumeFilters(c.avails, c.uniqueAudience, input));
 };
 
-const fetchInAppCandidates = async (input: PlannerInput): Promise<CandidateInventoryItem[]> => {
+const fetchInAppCandidates = async (input: PlannerInput, upliftPercent: number): Promise<CandidateInventoryItem[]> => {
     // mediaTypes narrowed this at the DB query level before — moved to JS (see
     // fetchWebsiteCandidates's comment for why) so a preferredSitesApps name match isn't hidden
     // by it.
@@ -281,11 +434,13 @@ const fetchInAppCandidates = async (input: PlannerInput): Promise<CandidateInven
             platform: 'in-app' as Platform,
             avails: Number(r.totalRequests),
             uniqueAudience: null, // not present in this sheet
-            cpm: clientCpm(r.eCpm),
+            cpm: clientCpm(r.eCpm, upliftPercent),
             vcr: null, // not present in this sheet
             iabCategories: null, // no category column in this sheet
             isPreferred: isPreferred(r.appName, r.inventoryUrl, input),
         }))
+        .map(c => scaleByTargeting(c, targetingFactor(input, DEFAULT_LINE_SHARES[c.line])))
+        .filter(c => c.avails > 0)
         .filter(c => c.isPreferred || input.inventory.maxCpm === null || c.cpm <= input.inventory.maxCpm)
         .filter(c => c.isPreferred || passesVolumeFilters(c.avails, c.uniqueAudience, input));
 };
@@ -299,19 +454,19 @@ export interface CandidateResult {
 /** Stage 1 — deterministic, no LLM. Builds the real shortlist the allocation engine and narration call both work from. */
 export const buildCandidateInventory = async (input: PlannerInput): Promise<CandidateResult> => {
     const requestedPlatforms = input.inventory.platforms.length > 0 ? input.inventory.platforms : PLATFORMS_ALL;
-    const tier = computeRateTier(input);
+    const { upliftPercent } = computePriceUplift(input);
 
     const linesNeeded = new Set(requestedPlatforms.flatMap(p => PLATFORM_LINE_MAP[p]));
 
     const ctvNeeded = linesNeeded.has('ctv-fast') || linesNeeded.has('ctv-ott');
-    const allCtv = ctvNeeded ? await fetchCtvCandidates(input, tier) : [];
+    const allCtv = ctvNeeded ? await fetchCtvCandidates(input, upliftPercent) : [];
 
     const byLine: Record<InventoryLine, CandidateInventoryItem[]> = {
         'ctv-fast': linesNeeded.has('ctv-fast') ? allCtv.filter(c => c.line === 'ctv-fast') : [],
         'ctv-ott': linesNeeded.has('ctv-ott') ? allCtv.filter(c => c.line === 'ctv-ott') : [],
-        'mobile-ott': linesNeeded.has('mobile-ott') ? await fetchMobileOttCandidates(input, tier) : [],
-        websites: linesNeeded.has('websites') ? await fetchWebsiteCandidates(input) : [],
-        'in-app': linesNeeded.has('in-app') ? await fetchInAppCandidates(input) : [],
+        'mobile-ott': linesNeeded.has('mobile-ott') ? await fetchMobileOttCandidates(input, upliftPercent) : [],
+        websites: linesNeeded.has('websites') ? await fetchWebsiteCandidates(input, upliftPercent) : [],
+        'in-app': linesNeeded.has('in-app') ? await fetchInAppCandidates(input, upliftPercent) : [],
     };
 
     // A brief naming a specific property in inventory.preferredSitesApps is asking "do you have
@@ -328,18 +483,18 @@ export const buildCandidateInventory = async (input: PlannerInput): Promise<Cand
     // fetch function — a named property priced or sized outside those filters still won't surface.)
     if (input.inventory.preferredSitesApps.length > 0) {
         if (!ctvNeeded) {
-            for (const c of (await fetchCtvCandidates(input, tier)).filter(c => c.isPreferred)) {
+            for (const c of (await fetchCtvCandidates(input, upliftPercent)).filter(c => c.isPreferred)) {
                 byLine[c.line].push(c);
             }
         }
         if (!linesNeeded.has('mobile-ott')) {
-            byLine['mobile-ott'].push(...(await fetchMobileOttCandidates(input, tier)).filter(c => c.isPreferred));
+            byLine['mobile-ott'].push(...(await fetchMobileOttCandidates(input, upliftPercent)).filter(c => c.isPreferred));
         }
         if (!linesNeeded.has('websites')) {
-            byLine.websites.push(...(await fetchWebsiteCandidates(input)).filter(c => c.isPreferred));
+            byLine.websites.push(...(await fetchWebsiteCandidates(input, upliftPercent)).filter(c => c.isPreferred));
         }
         if (!linesNeeded.has('in-app')) {
-            byLine['in-app'].push(...(await fetchInAppCandidates(input)).filter(c => c.isPreferred));
+            byLine['in-app'].push(...(await fetchInAppCandidates(input, upliftPercent)).filter(c => c.isPreferred));
         }
     }
 

@@ -1,4 +1,5 @@
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
+import { CalendarDay } from '../types/planner.types';
 
 const prisma = new PrismaClient();
 
@@ -40,4 +41,25 @@ export const getSupportedCountries = async (): Promise<string[]> => {
     );
     cachedCountries = rows.map(r => r.country);
     return cachedCountries;
+};
+
+/** Every calendar day from `fromDate` (YYYY-MM-DD) on, in date order — not cached, so a newly ingested month shows up without a restart. */
+export const getCalendar = async (fromDate: string): Promise<CalendarDay[]> => {
+    let rows;
+    try {
+        rows = await prisma.calendar.findMany({
+            where: { date: { gte: new Date(fromDate) } },
+            orderBy: { date: 'asc' },
+        });
+    } catch (err) {
+        // P2021 = table doesn't exist: the calendar migration hasn't been applied to this
+        // database yet. No calendar data, so best dates fall back to the AI estimate.
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2021') return [];
+        throw err;
+    }
+    return rows.map(r => ({
+        date: r.date.toISOString().slice(0, 10),
+        event: r.event,
+        multipliers: { ctv: r.ctvMultiplier, app: r.appMultiplier, web: r.webMultiplier },
+    }));
 };

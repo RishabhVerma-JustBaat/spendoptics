@@ -38,6 +38,10 @@ export type Gender = (typeof GENDERS)[number];
 export const AGE_GROUPS = ['18-24', '25-34', '35-44', '45-54', '55-64', '65+'] as const;
 export type AgeGroup = (typeof AGE_GROUPS)[number];
 
+/** Household-income bands, one per wallet-size tier in the website sheet (T1-T5, see schema.prisma's walletT*Pct comment): premium ₹1,00,000+/month, upper-middle ₹60,000-99,999, middle ₹30,000-59,999, lower-middle ₹15,000-29,999, value under ₹15,000. */
+export const INCOME_GROUPS = ['premium', 'upper-middle', 'middle', 'lower-middle', 'value'] as const;
+export type IncomeGroup = (typeof INCOME_GROUPS)[number];
+
 /**
  * The 9 platform values the form accepts — PLATFORM_LINE_MAP in planner.candidates.ts maps
  * these onto the 5 real output lines (a many-to-one map, and "can keep changing" per product
@@ -142,6 +146,7 @@ export interface PlannerInput {
         excludeStates: string[];
         gender: Gender | null;
         ageGroups: AgeGroup[];
+        incomeGroups: IncomeGroup[];
     };
     inventory: {
         platforms: Platform[];
@@ -193,6 +198,8 @@ export interface CandidateInventoryItem {
     /** Real IAB categories for this item, null where the source sheet has no category column at all (CTV/Mobile OTT/In-App today) — never guessed. */
     iabCategories: string[] | null;
     isPreferred: boolean;
+    /** R/N from the audience-targeting formula — avails and uniqueAudience above are already multiplied by it. 1 when no demographic is targeted or the shares are unknown. */
+    targetingFactor: number;
 }
 
 export interface RecommendedInventoryItem {
@@ -202,8 +209,10 @@ export interface RecommendedInventoryItem {
     reason: string | null; // filled by the narration call; null until then
     name: string;
     environment: string;
+    /** Targetable avails — the sheet's avails × targetingFactor. */
     avails: number;
     uniqueAudience: number | null;
+    targetingFactor: number;
     cpm: number;
     vcr: number | null;
     /** This item's own share of the line's budget/impressions — 0 for both when no campaign.budget was given at all, same as the line-level totals they're drawn from. */
@@ -250,6 +259,12 @@ export interface CpmFitResult {
     verdict: 'meets' | 'close' | 'misses';
 }
 
+/** Targeting surcharges on top of the base (client) CPM — each rule adds its percent to the base price, never compounded on another rule's. Already baked into every cpm/amount in the plan. */
+export interface PriceUplift {
+    upliftPercent: number;
+    uplifts: { rule: 'states' | 'demographic' | 'interest-audience'; percent: number }[];
+}
+
 /** The deterministic core of the plan — everything here is computed by allocation.service.ts, zero LLM involvement. Narration (title/summary/reason/assumptions/confidence text) gets merged in afterward by planner.prompts.ts's narration call. */
 export interface GeneratedPlanCore {
     keyFigures: {
@@ -266,6 +281,7 @@ export interface GeneratedPlanCore {
         pacing: Pacing | null;
     };
     rateTier: RateTier;
+    pricing: PriceUplift;
     budgetAllocation: BudgetAllocationLine[];
     plannedByTeam: { platform: Platform; reason: string }[];
     kpiFit: KpiFitResult[];
@@ -290,18 +306,31 @@ export interface GeneratedPlanCore {
     };
 }
 
-export const TARGET_GROUP_TYPES = ['gender', 'age'] as const;
+export const TARGET_GROUP_TYPES = ['gender', 'age', 'income'] as const;
 export type TargetGroupType = (typeof TARGET_GROUP_TYPES)[number];
 
 export interface RecommendedWindow {
     startDate: string;
     endDate: string;
-    /** AI's own judgment, 0-100 — not system-computed, since there's no avails-history/events data to compute it from. One deliberate exception to "every number is deterministic" — see planner.prompts.ts's narration call comment. */
+    /** 0-100. From the viewership calendar: the share of all possible flight windows this one beats on viewershipMultiplier. Without calendar data for the dates, the AI's own judgment — see bestDates.service.ts. */
     score: number;
+    /** Average viewership vs a typical weekday (1.00) over the window, weighted by the plan's own channel mix. Null when the AI picked the window. */
+    viewershipMultiplier: number | null;
+    /** Calendar events falling in the window (e.g. "Sunday / Diwali"). */
+    events: string[];
     reason: string;
 }
 
+/** One day of the calendar table: viewership vs a typical weekday (1.00) per channel. */
+export interface CalendarDay {
+    date: string; // YYYY-MM-DD
+    event: string | null;
+    multipliers: Record<'ctv' | 'app' | 'web', number>;
+}
+
 export interface BestDates {
+    /** "calendar" = windows picked and scored in code from the calendar table; "ai-estimate" = no calendar data covers the dates, so the narration call judged them. */
+    source: 'calendar' | 'ai-estimate';
     recommendedWindows: RecommendedWindow[];
     datesToAvoid: { dateRange: string; reason: string }[];
     givenVsBest: string | null;
@@ -334,6 +363,7 @@ export interface GeneratedPlan {
     };
     keyFigures: GeneratedPlanCore['keyFigures'];
     flight: GeneratedPlanCore['flight'];
+    pricing: GeneratedPlanCore['pricing'];
     bestDates: BestDates;
     budgetCurve: {
         points: { budget: number; reach: number; impressions: number; averageCpm: number; frequency: number | null }[];
@@ -366,4 +396,31 @@ export interface GeneratedPlan {
         cpmFit: CpmFitResult[];
         assumptions: string[];
     };
+}
+
+/** What changed between the plan being refined and the one refine() just produced — computed in code, not by the LLM. Deltas are new minus previous. */
+export interface PlanDiff {
+    keyFigures: { field: keyof GeneratedPlan['keyFigures']; previous: number | null; current: number | null; delta: number | null }[];
+    linesAdded: InventoryLine[];
+    linesRemoved: InventoryLine[];
+    lineChanges: {
+        inventoryLine: InventoryLine;
+        previousSharePercent: number;
+        currentSharePercent: number;
+        previousAmount: number;
+        currentAmount: number;
+        itemsAdded: string[];
+        itemsRemoved: string[];
+    }[];
+}
+
+/** What the refine route returns — the refined form (so the next refine round starts from it), the field changes an edited prompt caused, the regenerated plan, and how it differs from the previous one. */
+export interface RefineResult {
+    input: PlannerInput;
+    promptChanged: boolean;
+    promptChanges: { field: string; from: unknown; to: unknown }[];
+    /** Values the prompt edit produced that can't be right — removed from input, listed for the planner. */
+    warnings: { field: string; message: string }[];
+    plan: GeneratedPlan;
+    diff: PlanDiff;
 }
